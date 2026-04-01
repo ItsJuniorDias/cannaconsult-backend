@@ -15,15 +15,15 @@ app.use(cors());
 app.use(express.json());
 
 const customerMock = {
-  name: "João Silva",
-  email: "joao.silva@exemplo.com",
-  document: "12345678909", // CPF sem pontuação
+  name: "Alexandre Junior",
+  email: "alexandre.junior@exemplo.com",
+  document: "44955657885", // CPF sem pontuação
   type: "individual",
   phones: {
     mobile_phone: {
       country_code: "55",
-      area_code: "11",
-      number: "999999999",
+      area_code: "17",
+      number: "991115745",
     },
   },
 };

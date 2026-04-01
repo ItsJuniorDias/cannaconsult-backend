@@ -18,8 +18,12 @@ async function createPixOrder(customerData, itemsData) {
 
     const response = await api.post("/orders", payload);
 
+    console.log("Resposta do Pagar.me:", response.data); // Log para depuração
+
     // O retorno conterá o QR Code e o link para copiar e colar
     const pixData = response.data.charges[0].last_transaction;
+
+    console.log("Resposta do Pagar.me:", pixData); // Log para depuração
 
     return {
       orderId: response.data.id,
