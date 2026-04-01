@@ -14,32 +14,9 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 app.use(cors());
 app.use(express.json());
 
-const customerMock = {
-  name: "Alexandre Junior",
-  email: "alexandre.junior@exemplo.com",
-  document: "44955657885", // CPF sem pontuação
-  type: "individual",
-  phones: {
-    mobile_phone: {
-      country_code: "55",
-      area_code: "17",
-      number: "991115745",
-    },
-  },
-};
-
-const itemsMock = [
-  {
-    amount: 10000, // Valor em centavos (R$ 100,00)
-    description: "Tênis Esportivo",
-    quantity: 1,
-    code: "PROD123",
-  },
-];
-
 app.post("/api/checkout/pix", async (req, res) => {
   try {
-    const result = await createPixOrder(customerMock, itemsMock);
+    const result = await createPixOrder(req.body.customer, req.body.items);
 
     res.json(result);
   } catch (error) {
