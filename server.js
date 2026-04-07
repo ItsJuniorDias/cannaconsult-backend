@@ -2,34 +2,223 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const Stripe = require("stripe");
+const crypto = require("crypto");
+const axios = require("axios"); // [CORREÇÃO] Faltava importar o axios
+
+const { PDFDocument } = require("pdf-lib");
+const { plainAddPlaceholder } = require("@signpdf/placeholder-plain");
 
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
 
+const SIGNATURE_LENGTH = 8192;
 const app = express();
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
+// ============================================================================
+// ENDPOINT DE ASSINATURA BIRD ID
+// ============================================================================
+app.post("/api/assinar-birdid", async (req, res) => {
+  const { laudoId, otp, credentialId } = req.body;
+
+  if (!laudoId || !otp || !credentialId) {
+    return res
+      .status(400)
+      .json({ error: "laudoId, otp e credentialId são obrigatórios." });
+  }
+
+  try {
+    // 1. OBTER OU GERAR O PDF COM PLACEHOLDER
+    let pdfBuffer = await gerarPdfDoLaudoBackend(laudoId);
+
+    // 2. [CORREÇÃO CRÍTICA] PREPARAR O BYTERANGE E GERAR O HASH CORRETO
+    // Extrai as posições, atualiza o ByteRange no buffer e retorna o Hash exato
+    // que as certificadoras exigem (ignorando o espaço da assinatura).
+    const { pdfPreparadoBuffer, hashDocumento } =
+      prepararByteRangeEGerarHash(pdfBuffer);
+
+    // =====================================================================
+    // 3. INTEGRAÇÃO COM A API DO BIRD ID (SOLUTI)
+    // =====================================================================
+    const authResponse = await axios.post(
+      "https://vault.soluti.com.br/oauth/token",
+      {
+        grant_type: "client_credentials",
+        client_id: process.env.SOLUTI_CLIENT_ID,
+        client_secret: process.env.SOLUTI_CLIENT_SECRET,
+      },
+    );
+    const accessToken = authResponse.data.access_token;
+
+    const signResponse = await axios.post(
+      "https://vault.soluti.com.br/csc/v1/signatures/signHash",
+      {
+        credentialID: credentialId,
+        SAD: otp,
+        hash: [hashDocumento],
+        hashAlgorithm: "2.16.840.1.101.3.4.2.1", // SHA-256
+        signAlgo: "1.2.840.113549.1.1.11", // RSA com SHA-256
+      },
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    );
+
+    const assinaturaBase64 = signResponse.data.signatures[0];
+
+    // =====================================================================
+    // 4. EMBUTIR A ASSINATURA NO PDF
+    // =====================================================================
+    // Usamos o PDF que já tem o ByteRange calculado
+    const pdfAssinadoBuffer = await embutirAssinaturaNoPDF(
+      pdfPreparadoBuffer,
+      assinaturaBase64,
+    );
+
+    // =====================================================================
+    // 5. DEVOLVER PARA O FRONTEND
+    // =====================================================================
+    return res.status(200).json({
+      success: true,
+      message: "Laudo assinado com sucesso",
+      pdfAssinadoBase64: pdfAssinadoBuffer.toString("base64"),
+    });
+  } catch (error) {
+    console.error("Erro na assinatura:", error.response?.data || error.message);
+
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      return res
+        .status(401)
+        .json({ error: "Código OTP inválido ou expirado." });
+    }
+
+    return res
+      .status(500)
+      .json({ error: "Erro interno ao tentar assinar o documento." });
+  }
+});
+
+// ============================================================================
+// FUNÇÕES AUXILIARES DE PDF
+// ============================================================================
+
+async function gerarPdfDoLaudoBackend(laudoId) {
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([595.28, 841.89]);
+
+  page.drawText(`Laudo Médico/Técnico - ID: ${laudoId}`, {
+    x: 50,
+    y: 750,
+    size: 20,
+  });
+  page.drawText("Conteúdo do laudo...", { x: 50, y: 700, size: 12 });
+
+  const pdfBytes = await pdfDoc.save();
+  let pdfBuffer = Buffer.from(pdfBytes);
+
+  pdfBuffer = plainAddPlaceholder({
+    pdfBuffer,
+    reason: "Assinatura Digital do Laudo",
+    signatureLength: SIGNATURE_LENGTH,
+  });
+
+  return pdfBuffer;
+}
+
+/**
+ * [NOVA FUNÇÃO] Calcula o ByteRange e gera o Hash exigido pela Soluti
+ */
+function prepararByteRangeEGerarHash(pdfBuffer) {
+  const pdfString = pdfBuffer.toString("binary");
+
+  // Localiza os marcadores do placeholder
+  const byteRangePos = pdfString.indexOf("/ByteRange [");
+  if (byteRangePos === -1) throw new Error("Placeholder não encontrado.");
+
+  const byteRangeEnd = pdfString.indexOf("]", byteRangePos);
+  const signatureStart = pdfString.indexOf("<", byteRangeEnd);
+  const signatureEnd = pdfString.indexOf(">", signatureStart) + 1;
+
+  // Monta o array de ByteRange: [inicio, tamanho1, inicio2, tamanho2]
+  const byteRange = [
+    0,
+    signatureStart,
+    signatureEnd,
+    pdfBuffer.length - signatureEnd,
+  ];
+
+  // Substitui os zeros do placeholder pelo ByteRange real (mantendo o tamanho exato da string para não quebrar o arquivo)
+  const byteRangeString = `/ByteRange [${byteRange.join(" ")}]`;
+  const espacoOriginal = byteRangeEnd + 1 - byteRangePos;
+  const byteRangeFormatado = byteRangeString.padEnd(espacoOriginal, " ");
+
+  pdfBuffer.write(byteRangeFormatado, byteRangePos, espacoOriginal, "binary");
+
+  // O Hash que a Soluti assina precisa ser APENAS das partes do PDF antes e depois da assinatura
+  const hash = crypto.createHash("sha256");
+  hash.update(pdfBuffer.subarray(0, signatureStart));
+  hash.update(pdfBuffer.subarray(signatureEnd));
+
+  return {
+    pdfPreparadoBuffer: pdfBuffer,
+    hashDocumento: hash.digest("base64"),
+  };
+}
+
+async function embutirAssinaturaNoPDF(pdfPreparadoBuffer, signatureBase64) {
+  const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
+  const maxSignatureHexLength = SIGNATURE_LENGTH * 2;
+
+  if (signatureHex.length > maxSignatureHexLength) {
+    throw new Error("A assinatura é maior que o placeholder alocado.");
+  }
+
+  // Preenche com zeros à direita para não alterar o tamanho final do arquivo
+  const paddedSignatureHex = signatureHex.padEnd(maxSignatureHexLength, "0");
+
+  const pdfString = pdfPreparadoBuffer.toString("binary");
+  const signatureStart = pdfString.indexOf("<") + 1; // +1 para pular o '<'
+
+  // Substitui os zeros do placeholder pela assinatura hexadecimal
+  pdfPreparadoBuffer.write(
+    paddedSignatureHex,
+    signatureStart,
+    maxSignatureHexLength,
+    "hex",
+  );
+
+  return pdfPreparadoBuffer;
+}
+
+// ============================================================================
+// ENDPOINTS DE CHECKOUT
+// ============================================================================
+
 app.post("/api/checkout/pix", async (req, res) => {
   try {
-    const result = await createPixOrder(req.body.customer, req.body.items);
+    const { customer, items } = req.body;
 
+    // [CORREÇÃO] Validação básica adicionada
+    if (!customer || !items || items.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
+    }
+
+    const result = await createPixOrder(customer, items);
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: "Falha no checkout" });
+    console.error("Erro no checkout PIX:", error);
+    res.status(500).json({ error: "Falha no checkout via PIX." });
   }
 });
 
 app.post("/api/checkout/cartao", async (req, res) => {
   try {
-    // 1. Recebemos os dados enviados pelo frontend no corpo da requisição
     const { customer, items, cardToken, installments } = req.body;
 
-    // 2. Validação básica de segurança
     if (!cardToken) {
       return res
         .status(400)
@@ -41,18 +230,14 @@ app.post("/api/checkout/cartao", async (req, res) => {
         .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
     }
 
-    // 3. Chamamos o serviço que se comunica com o Pagar.me
-    // (A função createCreditCardOrder foi definida no exemplo anterior)
     const result = await createCreditCardOrder(
       customer,
       items,
       cardToken,
-      installments || 1, // Padrão: 1 parcela (à vista) se não for enviado
+      installments || 1,
     );
 
-    // 4. Verificamos o status do pagamento retornado pelo Pagar.me
     if (result.status === "failed") {
-      // Se o cartão for recusado (falta de limite, bloqueio, etc.)
       return res.status(402).json({
         success: false,
         message: "Pagamento recusado pelo banco emissor.",
@@ -60,7 +245,6 @@ app.post("/api/checkout/cartao", async (req, res) => {
       });
     }
 
-    // 5. Sucesso! Retornamos os dados da transação para o frontend
     return res.status(200).json({
       success: true,
       message: "Pagamento aprovado com sucesso!",
@@ -69,8 +253,6 @@ app.post("/api/checkout/cartao", async (req, res) => {
     });
   } catch (error) {
     console.error("Erro na rota de cartão de crédito:", error);
-
-    // Tratamento de erro genérico para o frontend
     return res.status(500).json({
       success: false,
       error: "Ocorreu um erro interno ao processar seu pagamento.",
@@ -78,58 +260,6 @@ app.post("/api/checkout/cartao", async (req, res) => {
   }
 });
 
-// Rota para criar a Sessão de Checkout
-app.post("/api/checkout_sessions", async (req, res) => {
-  async function ativarPixContaConectada() {
-    try {
-      const account = await stripe.accounts.update("acct_1TH3A7IKuiZX6Fzd", {
-        capabilities: {
-          pix_payments: { requested: true },
-        },
-      });
-      console.log("Solicitação de PIX enviada com sucesso:", account.id);
-    } catch (error) {
-      console.error("Erro ao atualizar conta:", error.message);
-    }
-  }
-
-  ativarPixContaConectada();
-
-  try {
-    // Recebe o ID do preço criado no Stripe Dashboard
-    const { priceId } = req.body;
-
-    // Validação básica de segurança
-    if (!priceId) {
-      return res.status(400).json({ error: "O priceId é obrigatório." });
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "payment", // ATENÇÃO: Se o seu priceId for de uma assinatura, mude de "payment" para "subscription"
-
-      // Passando o priceId diretamente
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
-
-      // URLs de redirecionamento após o pagamento ou cancelamento
-      success_url: `${process.env.CLIENT_URL}/chat`,
-      cancel_url: `${process.env.CLIENT_URL}/paywall`,
-    });
-
-    // Retorna a URL do Stripe Checkout para o front-end
-    res.json({ url: session.url });
-  } catch (error) {
-    console.error("Erro ao criar sessão no Stripe:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Iniciando o servidor
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
