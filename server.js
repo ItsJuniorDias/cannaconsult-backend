@@ -3,7 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
-const axios = require("axios"); // [CORREÇÃO] Faltava importar o axios
+const axios = require("axios");
 
 const { PDFDocument } = require("pdf-lib");
 const { plainAddPlaceholder } = require("@signpdf/placeholder-plain");
@@ -18,7 +18,35 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================================
-// ENDPOINT DE ASSINATURA BIRD ID
+// FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
+// ============================================================================
+async function verificarCaptcha(token) {
+  if (!token) return false;
+
+  const secretKey = process.env.RECAPTCHA_SECRET_KEY; // Chave secreta do seu .env
+
+  try {
+    const response = await axios.post(
+      `https://www.google.com/recaptcha/api/siteverify`,
+      null,
+      {
+        params: {
+          secret: secretKey,
+          response: token,
+        },
+      },
+    );
+
+    // Retorna true se for um humano válido, ou false se falhar
+    return response.data.success;
+  } catch (error) {
+    console.error("Erro ao validar reCAPTCHA no Google:", error.message);
+    return false;
+  }
+}
+
+// ============================================================================
+// ENDPOINT DE ASSINATURA BIRD ID (Mantido inalterado)
 // ============================================================================
 app.post("/api/assinar-birdid", async (req, res) => {
   const { laudoId, otp, credentialId } = req.body;
@@ -30,18 +58,10 @@ app.post("/api/assinar-birdid", async (req, res) => {
   }
 
   try {
-    // 1. OBTER OU GERAR O PDF COM PLACEHOLDER
     let pdfBuffer = await gerarPdfDoLaudoBackend(laudoId);
-
-    // 2. PREPARAR O BYTERANGE E GERAR O HASH CORRETO
     const { pdfPreparadoBuffer, hashDocumento } =
       prepararByteRangeEGerarHash(pdfBuffer);
 
-    // =====================================================================
-    // 3. INTEGRAÇÃO COM A API DO BIRD ID (SOLUTI)
-    // =====================================================================
-
-    // 👇 CORREÇÃO AQUI: Usando URLSearchParams para formato x-www-form-urlencoded 👇
     const tokenParams = new URLSearchParams();
     tokenParams.append("grant_type", "client_credentials");
     tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
@@ -58,15 +78,14 @@ app.post("/api/assinar-birdid", async (req, res) => {
     const accessToken = authResponse.data.access_token;
     console.log("Token de acesso obtido com sucesso!");
 
-    // Chamada para assinar o hash (Mantida como você fez, JSON aqui é correto!)
     const signResponse = await axios.post(
       "https://api.birdid.com.br/csc/v1/signatures/signHash",
       {
         credentialID: credentialId,
         SAD: otp,
         hash: [hashDocumento],
-        hashAlgorithm: "2.16.840.1.101.3.4.2.1", // OID do SHA-256
-        signAlgo: "1.2.840.113549.1.1.11", // OID do RSA com SHA-256
+        hashAlgorithm: "2.16.840.1.101.3.4.2.1",
+        signAlgo: "1.2.840.113549.1.1.11",
       },
       {
         headers: {
@@ -77,40 +96,31 @@ app.post("/api/assinar-birdid", async (req, res) => {
     );
 
     const assinaturaBase64 = signResponse.data.signatures[0];
-
-    // =====================================================================
-    // 4. EMBUTIR A ASSINATURA NO PDF
-    // =====================================================================
     const pdfAssinadoBuffer = await embutirAssinaturaNoPDF(
       pdfPreparadoBuffer,
       assinaturaBase64,
     );
 
-    // =====================================================================
-    // 5. DEVOLVER PARA O FRONTEND
-    // =====================================================================
     return res.status(200).json({
       success: true,
       message: "Laudo assinado com sucesso",
       pdfAssinadoBase64: pdfAssinadoBuffer.toString("base64"),
     });
   } catch (error) {
-    // Log detalhado para te ajudar no debug
     console.error("Erro na assinatura:", error.response?.data || error.message);
-
     if (error.response?.status === 401 || error.response?.status === 403) {
       return res
         .status(401)
         .json({ error: "Código OTP inválido ou expirado." });
     }
-
     return res
       .status(500)
       .json({ error: "Erro interno ao tentar assinar o documento." });
   }
 });
+
 // ============================================================================
-// FUNÇÕES AUXILIARES DE PDF
+// FUNÇÕES AUXILIARES DE PDF (Mantidas inalteradas)
 // ============================================================================
 
 async function gerarPdfDoLaudoBackend(laudoId) {
@@ -122,31 +132,23 @@ async function gerarPdfDoLaudoBackend(laudoId) {
     y: 750,
     size: 20,
   });
-
   page.drawText("Conteúdo do laudo...", { x: 50, y: 700, size: 12 });
 
-  // 👇 A MÁGICA ACONTECE AQUI 👇
-  // Desativa os Object Streams para que o node-signpdf consiga ler o xref
   const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
-
   let pdfBuffer = Buffer.from(pdfBytes);
 
   pdfBuffer = plainAddPlaceholder({
     pdfBuffer,
     reason: "Assinatura Digital do Laudo",
-    signatureLength: SIGNATURE_LENGTH, // Garanta que SIGNATURE_LENGTH está definido (ex: 8192)
+    signatureLength: SIGNATURE_LENGTH,
   });
 
   return pdfBuffer;
 }
 
-/**
- * [NOVA FUNÇÃO] Calcula o ByteRange e gera o Hash exigido pela Soluti
- */
 function prepararByteRangeEGerarHash(pdfBuffer) {
   const pdfString = pdfBuffer.toString("binary");
 
-  // Localiza os marcadores do placeholder
   const byteRangePos = pdfString.indexOf("/ByteRange [");
   if (byteRangePos === -1) throw new Error("Placeholder não encontrado.");
 
@@ -154,7 +156,6 @@ function prepararByteRangeEGerarHash(pdfBuffer) {
   const signatureStart = pdfString.indexOf("<", byteRangeEnd);
   const signatureEnd = pdfString.indexOf(">", signatureStart) + 1;
 
-  // Monta o array de ByteRange: [inicio, tamanho1, inicio2, tamanho2]
   const byteRange = [
     0,
     signatureStart,
@@ -162,14 +163,12 @@ function prepararByteRangeEGerarHash(pdfBuffer) {
     pdfBuffer.length - signatureEnd,
   ];
 
-  // Substitui os zeros do placeholder pelo ByteRange real (mantendo o tamanho exato da string para não quebrar o arquivo)
   const byteRangeString = `/ByteRange [${byteRange.join(" ")}]`;
   const espacoOriginal = byteRangeEnd + 1 - byteRangePos;
   const byteRangeFormatado = byteRangeString.padEnd(espacoOriginal, " ");
 
   pdfBuffer.write(byteRangeFormatado, byteRangePos, espacoOriginal, "binary");
 
-  // O Hash que a Soluti assina precisa ser APENAS das partes do PDF antes e depois da assinatura
   const hash = crypto.createHash("sha256");
   hash.update(pdfBuffer.subarray(0, signatureStart));
   hash.update(pdfBuffer.subarray(signatureEnd));
@@ -188,13 +187,10 @@ async function embutirAssinaturaNoPDF(pdfPreparadoBuffer, signatureBase64) {
     throw new Error("A assinatura é maior que o placeholder alocado.");
   }
 
-  // Preenche com zeros à direita para não alterar o tamanho final do arquivo
   const paddedSignatureHex = signatureHex.padEnd(maxSignatureHexLength, "0");
-
   const pdfString = pdfPreparadoBuffer.toString("binary");
-  const signatureStart = pdfString.indexOf("<") + 1; // +1 para pular o '<'
+  const signatureStart = pdfString.indexOf("<") + 1;
 
-  // Substitui os zeros do placeholder pela assinatura hexadecimal
   pdfPreparadoBuffer.write(
     paddedSignatureHex,
     signatureStart,
@@ -206,20 +202,29 @@ async function embutirAssinaturaNoPDF(pdfPreparadoBuffer, signatureBase64) {
 }
 
 // ============================================================================
-// ENDPOINTS DE CHECKOUT
+// ENDPOINTS DE CHECKOUT (Agora protegidos pelo reCAPTCHA)
 // ============================================================================
 
 app.post("/api/checkout/pix", async (req, res) => {
   try {
-    const { customer, items } = req.body;
+    // 1. Extrai o captchaToken enviado pelo frontend
+    const { customer, items, captchaToken } = req.body;
 
-    // [CORREÇÃO] Validação básica adicionada
     if (!customer || !items || items.length === 0) {
       return res
         .status(400)
         .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
     }
 
+    // 2. Validação do Captcha (A barreira contra bots)
+    const isHuman = await verificarCaptcha(captchaToken);
+    if (!isHuman) {
+      return res
+        .status(403)
+        .json({ error: "Falha de segurança. Verificação de bot rejeitada." });
+    }
+
+    // 3. Se for humano, cria o pedido no Pagar.me
     const result = await createPixOrder(customer, items);
     res.json(result);
   } catch (error) {
@@ -230,7 +235,8 @@ app.post("/api/checkout/pix", async (req, res) => {
 
 app.post("/api/checkout/cartao", async (req, res) => {
   try {
-    const { customer, items, cardToken, installments } = req.body;
+    // 1. Extrai o captchaToken enviado pelo frontend
+    const { customer, items, cardToken, installments, captchaToken } = req.body;
 
     if (!cardToken) {
       return res
@@ -243,6 +249,15 @@ app.post("/api/checkout/cartao", async (req, res) => {
         .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
     }
 
+    // 2. Validação do Captcha (A barreira contra bots)
+    const isHuman = await verificarCaptcha(captchaToken);
+    if (!isHuman) {
+      return res
+        .status(403)
+        .json({ error: "Falha de segurança. Verificação de bot rejeitada." });
+    }
+
+    // 3. Se for humano, cria o pedido no Pagar.me
     const result = await createCreditCardOrder(
       customer,
       items,
