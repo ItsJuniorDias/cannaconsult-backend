@@ -33,36 +33,46 @@ app.post("/api/assinar-birdid", async (req, res) => {
     // 1. OBTER OU GERAR O PDF COM PLACEHOLDER
     let pdfBuffer = await gerarPdfDoLaudoBackend(laudoId);
 
-    // 2. [CORREÇÃO CRÍTICA] PREPARAR O BYTERANGE E GERAR O HASH CORRETO
-    // Extrai as posições, atualiza o ByteRange no buffer e retorna o Hash exato
-    // que as certificadoras exigem (ignorando o espaço da assinatura).
+    // 2. PREPARAR O BYTERANGE E GERAR O HASH CORRETO
     const { pdfPreparadoBuffer, hashDocumento } =
       prepararByteRangeEGerarHash(pdfBuffer);
 
     // =====================================================================
     // 3. INTEGRAÇÃO COM A API DO BIRD ID (SOLUTI)
     // =====================================================================
+
+    // 👇 CORREÇÃO AQUI: Usando URLSearchParams para formato x-www-form-urlencoded 👇
+    const tokenParams = new URLSearchParams();
+    tokenParams.append("grant_type", "client_credentials");
+    tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
+    tokenParams.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
+
     const authResponse = await axios.post(
-      "https://vault.soluti.com.br/oauth/token",
+      "https://api.birdid.com.br/oauth/token",
+      tokenParams,
       {
-        grant_type: "client_credentials",
-        client_id: process.env.SOLUTI_CLIENT_ID,
-        client_secret: process.env.SOLUTI_CLIENT_SECRET,
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
       },
     );
-    const accessToken = authResponse.data.access_token;
 
+    const accessToken = authResponse.data.access_token;
+    console.log("Token de acesso obtido com sucesso!");
+
+    // Chamada para assinar o hash (Mantida como você fez, JSON aqui é correto!)
     const signResponse = await axios.post(
-      "https://vault.soluti.com.br/csc/v1/signatures/signHash",
+      "https://api.birdid.com.br/csc/v1/signatures/signHash",
       {
         credentialID: credentialId,
         SAD: otp,
         hash: [hashDocumento],
-        hashAlgorithm: "2.16.840.1.101.3.4.2.1", // SHA-256
-        signAlgo: "1.2.840.113549.1.1.11", // RSA com SHA-256
+        hashAlgorithm: "2.16.840.1.101.3.4.2.1", // OID do SHA-256
+        signAlgo: "1.2.840.113549.1.1.11", // OID do RSA com SHA-256
       },
       {
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
       },
     );
 
@@ -71,7 +81,6 @@ app.post("/api/assinar-birdid", async (req, res) => {
     // =====================================================================
     // 4. EMBUTIR A ASSINATURA NO PDF
     // =====================================================================
-    // Usamos o PDF que já tem o ByteRange calculado
     const pdfAssinadoBuffer = await embutirAssinaturaNoPDF(
       pdfPreparadoBuffer,
       assinaturaBase64,
@@ -86,6 +95,7 @@ app.post("/api/assinar-birdid", async (req, res) => {
       pdfAssinadoBase64: pdfAssinadoBuffer.toString("base64"),
     });
   } catch (error) {
+    // Log detalhado para te ajudar no debug
     console.error("Erro na assinatura:", error.response?.data || error.message);
 
     if (error.response?.status === 401 || error.response?.status === 403) {
@@ -99,7 +109,6 @@ app.post("/api/assinar-birdid", async (req, res) => {
       .json({ error: "Erro interno ao tentar assinar o documento." });
   }
 });
-
 // ============================================================================
 // FUNÇÕES AUXILIARES DE PDF
 // ============================================================================
@@ -113,15 +122,19 @@ async function gerarPdfDoLaudoBackend(laudoId) {
     y: 750,
     size: 20,
   });
+
   page.drawText("Conteúdo do laudo...", { x: 50, y: 700, size: 12 });
 
-  const pdfBytes = await pdfDoc.save();
+  // 👇 A MÁGICA ACONTECE AQUI 👇
+  // Desativa os Object Streams para que o node-signpdf consiga ler o xref
+  const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
+
   let pdfBuffer = Buffer.from(pdfBytes);
 
   pdfBuffer = plainAddPlaceholder({
     pdfBuffer,
     reason: "Assinatura Digital do Laudo",
-    signatureLength: SIGNATURE_LENGTH,
+    signatureLength: SIGNATURE_LENGTH, // Garanta que SIGNATURE_LENGTH está definido (ex: 8192)
   });
 
   return pdfBuffer;
