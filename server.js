@@ -5,7 +5,6 @@ const cors = require("cors");
 const crypto = require("crypto");
 const axios = require("axios");
 
-const { PDFDocument } = require("pdf-lib");
 const { plainAddPlaceholder } = require("@signpdf/placeholder-plain");
 
 const { createPixOrder } = require("./controller/pixService");
@@ -22,34 +21,25 @@ app.use(express.json());
 // ============================================================================
 async function verificarCaptcha(token) {
   if (!token) return false;
-
-  const secretKey = process.env.RECAPTCHA_SECRET_KEY; // Chave secreta do seu .env
-
+  const secretKey = process.env.RECAPTCHA_SECRET_KEY;
   try {
     const response = await axios.post(
       `https://www.google.com/recaptcha/api/siteverify`,
       null,
-      {
-        params: {
-          secret: secretKey,
-          response: token,
-        },
-      },
+      { params: { secret: secretKey, response: token } },
     );
-
-    // Retorna true se for um humano válido, ou false se falhar
     return response.data.success;
   } catch (error) {
-    console.error("Erro ao validar reCAPTCHA no Google:", error.message);
+    console.error("Erro ao validar reCAPTCHA:", error.message);
     return false;
   }
 }
 
 // ============================================================================
-// ENDPOINT DE ASSINATURA BIRD ID (Em lote: Laudo e Receita)
+// ENDPOINT DE ASSINATURA BIRD ID (Preservando o visual original)
 // ============================================================================
 app.post("/api/assinar-birdid", async (req, res) => {
-  const { laudoId, otp, credentialId } = req.body;
+  const { laudoId, otp, credentialId, laudoPdfUrl, receitaPdfUrl } = req.body;
 
   if (!laudoId || !otp || !credentialId) {
     return res
@@ -57,17 +47,39 @@ app.post("/api/assinar-birdid", async (req, res) => {
       .json({ error: "laudoId, otp e credentialId são obrigatórios." });
   }
 
+  if (!laudoPdfUrl && !receitaPdfUrl) {
+    return res
+      .status(400)
+      .json({ error: "É necessário enviar a URL do Laudo ou da Receita." });
+  }
+
   try {
-    // 1. Gerar/Obter os buffers dos dois PDFs
-    let pdfLaudoBuffer = await gerarPdfDoLaudoBackend(laudoId);
-    let pdfReceitaBuffer = await gerarPdfDaReceitaBackend(laudoId);
+    const hashes = [];
+    let preparacaoLaudo = null;
+    let preparacaoReceita = null;
 
-    // 2. Preparar os placeholders e gerar os hashes de ambos
-    const preparacaoLaudo = prepararByteRangeEGerarHash(pdfLaudoBuffer);
-    const preparacaoReceita = prepararByteRangeEGerarHash(pdfReceitaBuffer);
+    // 1. Baixa os PDFs originais e prepara (adiciona placeholder sem mudar visual)
+    if (laudoPdfUrl) {
+      const laudoBuffer = await obterPdfOriginalEPreparar(
+        laudoPdfUrl,
+        "Assinatura Digital do Laudo",
+      );
+      preparacaoLaudo = prepararByteRangeEGerarHash(laudoBuffer);
+      hashes.push(preparacaoLaudo.hashDocumento);
+    }
 
-    // 3. Obter token de acesso do Soluti/BirdID
+    if (receitaPdfUrl) {
+      const receitaBuffer = await obterPdfOriginalEPreparar(
+        receitaPdfUrl,
+        "Assinatura Digital da Receita",
+      );
+      preparacaoReceita = prepararByteRangeEGerarHash(receitaBuffer);
+      hashes.push(preparacaoReceita.hashDocumento);
+    }
+
+    // 2. Obter token de acesso do Soluti/BirdID
     const tokenParams = new URLSearchParams();
+
     tokenParams.append("grant_type", "client_credentials");
     tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
     tokenParams.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
@@ -75,22 +87,19 @@ app.post("/api/assinar-birdid", async (req, res) => {
     const authResponse = await axios.post(
       "https://api.birdid.com.br/oauth/token",
       tokenParams,
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      },
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
     );
 
     const accessToken = authResponse.data.access_token;
-    console.log("Token de acesso obtido com sucesso para assinatura em lote!");
+    console.log("Token de acesso obtido com sucesso para assinatura!");
 
-    // 4. Enviar os DOIS hashes em uma única requisição para o BirdID
+    // 3. Enviar os hashes em uma única requisição para o BirdID
     const signResponse = await axios.post(
       "https://api.birdid.com.br/csc/v1/signatures/signHash",
       {
         credentialID: credentialId,
         SAD: otp,
-        // Array com os hashes na ordem: [Laudo, Receita]
-        hash: [preparacaoLaudo.hashDocumento, preparacaoReceita.hashDocumento],
+        hash: hashes,
         hashAlgorithm: "2.16.840.1.101.3.4.2.1",
         signAlgo: "1.2.840.113549.1.1.11",
       },
@@ -102,26 +111,36 @@ app.post("/api/assinar-birdid", async (req, res) => {
       },
     );
 
-    // 5. O BirdID devolve as assinaturas na mesma ordem que enviamos os hashes
-    const assinaturaLaudoBase64 = signResponse.data.signatures[0];
-    const assinaturaReceitaBase64 = signResponse.data.signatures[1];
+    // 4. Embutir as assinaturas nos documentos correspondentes
+    let laudoAssinadoBase64 = null;
+    let receitaAssinadaBase64 = null;
+    let indiceAssinatura = 0; // Controla qual assinatura da array pertence a qual documento
 
-    // 6. Embutir as respectivas assinaturas em seus PDFs
-    const laudoAssinadoBuffer = await embutirAssinaturaNoPDF(
-      preparacaoLaudo.pdfPreparadoBuffer,
-      assinaturaLaudoBase64,
-    );
-    const receitaAssinadaBuffer = await embutirAssinaturaNoPDF(
-      preparacaoReceita.pdfPreparadoBuffer,
-      assinaturaReceitaBase64,
-    );
+    if (preparacaoLaudo) {
+      const assinaturaBase64 = signResponse.data.signatures[indiceAssinatura];
+      const bufferAssinado = await embutirAssinaturaNoPDF(
+        preparacaoLaudo.pdfPreparadoBuffer,
+        assinaturaBase64,
+      );
+      laudoAssinadoBase64 = bufferAssinado.toString("base64");
+      indiceAssinatura++;
+    }
 
-    // 7. Retornar os dois PDFs assinados em Base64 para o Frontend
+    if (preparacaoReceita) {
+      const assinaturaBase64 = signResponse.data.signatures[indiceAssinatura];
+      const bufferAssinado = await embutirAssinaturaNoPDF(
+        preparacaoReceita.pdfPreparadoBuffer,
+        assinaturaBase64,
+      );
+      receitaAssinadaBase64 = bufferAssinado.toString("base64");
+    }
+
+    // 5. Retornar os PDFs assinados mantendo 100% da integridade visual
     return res.status(200).json({
       success: true,
-      message: "Laudo e Receita assinados com sucesso",
-      laudoAssinadoBase64: laudoAssinadoBuffer.toString("base64"),
-      receitaAssinadaBase64: receitaAssinadaBuffer.toString("base64"),
+      message: "Documentos assinados com sucesso",
+      laudoAssinadoBase64,
+      receitaAssinadaBase64,
     });
   } catch (error) {
     console.error("Erro na assinatura:", error.response?.data || error.message);
@@ -140,50 +159,16 @@ app.post("/api/assinar-birdid", async (req, res) => {
 // FUNÇÕES AUXILIARES DE PDF
 // ============================================================================
 
-async function gerarPdfDoLaudoBackend(laudoId) {
-  const pdfDoc = await PDFDocument.create();
-  const page = pdfDoc.addPage([595.28, 841.89]);
+// NOVA FUNÇÃO: Faz download do PDF já existente e insere a camada de assinatura
+async function obterPdfOriginalEPreparar(pdfUrl, motivo) {
+  // Baixa o PDF do Firebase Storage (ou qualquer URL) como ArrayBuffer
+  const response = await axios.get(pdfUrl, { responseType: "arraybuffer" });
+  let pdfBuffer = Buffer.from(response.data);
 
-  page.drawText(`Laudo Médico/Técnico - ID: ${laudoId}`, {
-    x: 50,
-    y: 750,
-    size: 20,
-  });
-  page.drawText("Conteúdo do laudo...", { x: 50, y: 700, size: 12 });
-
-  const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
-  let pdfBuffer = Buffer.from(pdfBytes);
-
+  // Usa o @signpdf para alocar espaço para assinatura digital sem alterar a visão do documento
   pdfBuffer = plainAddPlaceholder({
     pdfBuffer,
-    reason: "Assinatura Digital do Laudo",
-    signatureLength: SIGNATURE_LENGTH,
-  });
-
-  return pdfBuffer;
-}
-
-async function gerarPdfDaReceitaBackend(laudoId) {
-  const pdfDoc = await PDFDocument.create();
-  const page = pdfDoc.addPage([595.28, 841.89]);
-
-  page.drawText(`Receita Médica - ID: ${laudoId}`, {
-    x: 50,
-    y: 750,
-    size: 20,
-  });
-  page.drawText("Prescrição de medicamentos e dosagens...", {
-    x: 50,
-    y: 700,
-    size: 12,
-  });
-
-  const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
-  let pdfBuffer = Buffer.from(pdfBytes);
-
-  pdfBuffer = plainAddPlaceholder({
-    pdfBuffer,
-    reason: "Assinatura Digital da Receita",
+    reason: motivo,
     signatureLength: SIGNATURE_LENGTH,
   });
 
@@ -251,57 +236,30 @@ async function embutirAssinaturaNoPDF(pdfPreparadoBuffer, signatureBase64) {
 
 app.post("/api/checkout/pix", async (req, res) => {
   try {
-    // 1. Extrai o captchaToken enviado pelo frontend
     const { customer, items, captchaToken } = req.body;
-
     if (!customer || !items || items.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
+      return res.status(400).json({ error: "Dados inválidos." });
     }
-
-    // 2. Validação do Captcha (A barreira contra bots)
     const isHuman = await verificarCaptcha(captchaToken);
-    if (!isHuman) {
-      return res
-        .status(403)
-        .json({ error: "Falha de segurança. Verificação de bot rejeitada." });
-    }
+    if (!isHuman) return res.status(403).json({ error: "Falha de segurança." });
 
-    // 3. Se for humano, cria o pedido no Pagar.me
     const result = await createPixOrder(customer, items);
     res.json(result);
   } catch (error) {
     console.error("Erro no checkout PIX:", error);
-    res.status(500).json({ error: "Falha no checkout via PIX." });
+    res.status(500).json({ error: "Falha no checkout PIX." });
   }
 });
 
 app.post("/api/checkout/cartao", async (req, res) => {
   try {
-    // 1. Extrai o captchaToken enviado pelo frontend
     const { customer, items, cardToken, installments, captchaToken } = req.body;
-
-    if (!cardToken) {
-      return res
-        .status(400)
-        .json({ error: "O token do cartão é obrigatório." });
+    if (!cardToken || !customer || !items || items.length === 0) {
+      return res.status(400).json({ error: "Dados inválidos." });
     }
-    if (!customer || !items || items.length === 0) {
-      return res
-        .status(400)
-        .json({ error: "Dados do cliente ou itens do carrinho inválidos." });
-    }
-
-    // 2. Validação do Captcha (A barreira contra bots)
     const isHuman = await verificarCaptcha(captchaToken);
-    if (!isHuman) {
-      return res
-        .status(403)
-        .json({ error: "Falha de segurança. Verificação de bot rejeitada." });
-    }
+    if (!isHuman) return res.status(403).json({ error: "Falha de segurança." });
 
-    // 3. Se for humano, cria o pedido no Pagar.me
     const result = await createCreditCardOrder(
       customer,
       items,
@@ -312,23 +270,19 @@ app.post("/api/checkout/cartao", async (req, res) => {
     if (result.status === "failed") {
       return res.status(402).json({
         success: false,
-        message: "Pagamento recusado pelo banco emissor.",
+        message: "Recusado pelo emissor.",
         orderId: result.orderId,
       });
     }
-
     return res.status(200).json({
       success: true,
-      message: "Pagamento aprovado com sucesso!",
+      message: "Aprovado!",
       orderId: result.orderId,
       status: result.status,
     });
   } catch (error) {
-    console.error("Erro na rota de cartão de crédito:", error);
-    return res.status(500).json({
-      success: false,
-      error: "Ocorreu um erro interno ao processar seu pagamento.",
-    });
+    console.error("Erro na rota cartão:", error);
+    return res.status(500).json({ success: false, error: "Erro interno." });
   }
 });
 
