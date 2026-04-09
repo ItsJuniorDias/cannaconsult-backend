@@ -17,6 +17,73 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================================
+// ENDPOINT PARA BUSCAR O CREDENTIAL ID PELO CPF
+// ============================================================================
+app.post("/api/buscar-certificado", async (req, res) => {
+  try {
+    const { cpf } = req.body;
+
+    if (!cpf) {
+      return res.status(400).json({ error: "O CPF é obrigatório." });
+    }
+
+    // 1. Limpar o CPF (manter apenas os números)
+    const cpfLimpo = cpf.replace(/\D/g, "");
+
+    // 2. Obter token de acesso do Soluti/BirdID
+    const tokenParams = new URLSearchParams();
+    tokenParams.append("grant_type", "client_credentials");
+    tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
+    tokenParams.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
+
+    const authResponse = await axios.post(
+      "https://api.birdid.com.br/oauth/token",
+      tokenParams,
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+    );
+
+    const accessToken = authResponse.data.access_token;
+
+    // 3. Consultar a lista de credenciais usando o CPF como userID
+    const listResponse = await axios.post(
+      "https://api.birdid.com.br/csc/v1/credentials/list",
+      {
+        userID: cpfLimpo, // Na API do BirdID, o CPF é enviado no campo userID
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    const credentialIDs = listResponse.data.credentialIDs;
+
+    // Se o array vier vazio ou não existir, o médico não tem BirdID ativo
+    if (!credentialIDs || credentialIDs.length === 0) {
+      return res.status(404).json({
+        error: "Nenhum certificado BirdID ativo encontrado para este CPF.",
+      });
+    }
+
+    // 4. Retorna o ID da credencial (geralmente pegamos a primeira [0])
+    return res.status(200).json({
+      success: true,
+      credentialId: credentialIDs[0],
+    });
+  } catch (error) {
+    console.error(
+      "Erro ao buscar credencial:",
+      error.response?.data || error.message,
+    );
+    return res.status(500).json({
+      error: "Erro interno ao tentar localizar o certificado na Soluti.",
+    });
+  }
+});
+
+// ============================================================================
 // FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
 // ============================================================================
 async function verificarCaptcha(token) {
