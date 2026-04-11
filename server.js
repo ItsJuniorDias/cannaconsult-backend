@@ -5,7 +5,9 @@ const cors = require("cors");
 const crypto = require("crypto");
 const axios = require("axios");
 
-const { plainAddPlaceholder } = require("@signpdf/placeholder-plain");
+const helmet = require("helmet");
+const SolutiService = require("./services/solutiService");
+const PdfService = require("./services/pdfService");
 
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
@@ -16,105 +18,159 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post("/api/gerar-hash-pdf", async (req, res) => {
-  try {
-    const { pdfLaudo, pdfReceita, motivo } = req.body;
-
-    if (!pdfLaudo || !pdfReceita || !motivo) {
-      return res
-        .status(400)
-        .json({ error: "pdfLaudo, pdfReceita e motivo são obrigatórios." });
-    }
-
-    // 1. Gerar o hash do PDF usando SHA-256
-    const hashLaudo = crypto
-      .createHash("sha256")
-      .update(Buffer.from(pdfLaudo, "base64"))
-      .digest("hex");
-
-    const hashReceita = crypto
-      .createHash("sha256")
-      .update(Buffer.from(pdfReceita, "base64"))
-      .digest("hex");
-
-    console.log("Hash do Laudo:", hashLaudo);
-    console.log("Hash da Receita:", hashReceita);
-
-    // 2. Retornar os hashes e o motivo para o frontend
-    return res.status(200).json({
-      success: true,
-      hashLaudo,
-      hashReceita,
-      motivo,
-    });
-  } catch (error) {
-    console.error("Erro ao gerar hash do PDF:", error.message);
-    return res.status(500).json({
-      error: "Erro interno ao processar o PDF.",
-    });
-  }
+// Rota 1: Gerar URL (Apenas para referência, no front você gerou a URL direto no botão)
+app.get("/api/auth-url", (req, res) => {
+  const url = `${process.env.SOLUTI_OAUTH_URL}/authorize?client_id=${process.env.SOLUTI_CLIENT_ID}&redirect_uri=${process.env.SOLUTI_REDIRECT_URI}&response_type=code&scope=signature`;
+  res.json({ url });
 });
 
 // ============================================================================
-// ENDPOINT PARA BUSCAR O CREDENTIAL ID PELO CPF
+// ROTAS DO BIRD ID (SOLUTI)
 // ============================================================================
-app.post("/api/buscar-certificado", async (req, res) => {
-  try {
-    const { cpf } = req.body;
 
-    if (!cpf) {
-      return res.status(400).json({ error: "O CPF é obrigatório." });
+// 1. Rota para trocar o Authorization Code pelo Access Token
+app.post("/api/auth/birdid/callback", async (req, res) => {
+  const { code } = req.body;
+
+  if (!code) {
+    return res.status(400).json({ error: "Código de autorização ausente" });
+  }
+
+  try {
+    // Busca o Token na Soluti
+    const tokenResponse = await SolutiService.getAccessToken(code);
+
+    // IMPORTANTE: Se o seu SolutiService retorna o JSON inteiro da Soluti, pegue o access_token.
+    // Se ele já retorna a string, use apenas `tokenResponse`.
+    const accessToken =
+      typeof tokenResponse === "string"
+        ? tokenResponse
+        : tokenResponse.access_token;
+
+    console.log("Access Token recebido com sucesso!");
+
+    // Devolve para o Frontend salvar no LocalStorage
+    res.json({ access_token: accessToken });
+  } catch (error) {
+    console.error("Erro ao gerar token BirdID:", error);
+    res
+      .status(500)
+      .json({ error: error.message || "Falha interna ao gerar token" });
+  }
+});
+
+// 2. Rota para Assinar os Documentos (Laudo e Receita)
+app.post("/api/sign", async (req, res) => {
+  const { token, laudos, otp } = req.body;
+
+  // 1. Validação inicial
+  if (!token || !laudos || !otp) {
+    return res
+      .status(400)
+      .json({ error: "Token, dados do laudo e OTP são obrigatórios." });
+  }
+
+  try {
+    console.log(
+      `Iniciando assinatura para o paciente: ${laudos.paciente} | ID: ${laudos.id}`,
+    );
+
+    const urlLaudo = laudos.laudoPdfUrl || laudos.documentoPdfUrl;
+    const urlReceita = laudos.receitaPdfUrl;
+
+    // Função auxiliar para baixar o arquivo PDF como Buffer
+    const downloadPdf = async (url) => {
+      if (!url) return null;
+      // IMPORTANTE: responseType 'arraybuffer' é vital para não corromper o PDF
+      const response = await axios.get(url, { responseType: "arraybuffer" });
+      return Buffer.from(response.data);
+    };
+
+    // 2. Faz o download dos documentos disponíveis
+    const pdfLaudoBuffer = await downloadPdf(urlLaudo);
+    const pdfReceitaBuffer = await downloadPdf(urlReceita);
+
+    if (!pdfLaudoBuffer && !pdfReceitaBuffer) {
+      return res
+        .status(400)
+        .json({ error: "Nenhum documento em PDF encontrado para assinar." });
     }
 
-    // 2. Obter token de acesso do Soluti/BirdID e aos certificados do usuário (CPF) usando client_credentials
-    const tokenParams = new URLSearchParams();
-    tokenParams.append("grant_type", "client_credentials");
-    tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
-    tokenParams.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
+    let laudoAssinadoBuffer = null;
+    let receitaAssinadaBuffer = null;
 
-    const authResponse = await axios.post(
-      "https://api.birdid.com.br/oauth/token",
-      tokenParams,
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
-    );
+    // 3. Processo de Assinatura do LAUDO
+    if (pdfLaudoBuffer) {
+      console.log("⚙️ Gerando hash e assinando Laudo...");
+      // a) Prepara o PDF e extrai o Hash
+      const laudoPreparado = await PdfService.preparePdf(pdfLaudoBuffer);
+      const laudoHash =
+        await PdfService.calculateHashForSigning(laudoPreparado);
 
-    const accessToken = authResponse.data.access_token;
+      // b) Envia o Hash para a Soluti/BirdID assinar
+      // A assinatura retornada geralmente é um Base64 (PKCS#7 ou CAdES)
+      const assinaturaLaudo = await SolutiService.signHash(
+        laudoHash,
+        token,
+        otp,
+      );
 
-    // 3. Consultar a lista de credenciais usando o CPF como userID
-    const listResponse = await axios.get(
-      `https://api.birdid.com.br/v0/oauth/certificate-discovery`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`, // O token que você acabou de gerar
-        },
-      },
-    );
+      // c) Injeta a assinatura gráfica/metadados no PDF
+      laudoAssinadoBuffer = await PdfService.injectSignature(
+        laudoPreparado,
+        assinaturaLaudo,
+      );
+    }
 
-    const credentialIDs = listResponse.data;
+    // 4. Processo de Assinatura da RECEITA
+    if (pdfReceitaBuffer) {
+      console.log("⚙️ Gerando hash e assinando Receita...");
+      const receitaPreparada = await PdfService.preparePdf(pdfReceitaBuffer);
+      const receitaHash =
+        await PdfService.calculateHashForSigning(receitaPreparada);
 
-    console.log("Credenciais encontradas para o CPF:", credentialIDs);
+      const assinaturaReceita = await SolutiService.signHash(
+        receitaHash,
+        token,
+        otp,
+      );
 
-    // // Se o array vier vazio ou não existir, o médico não tem BirdID ativo
-    // if (!credentialIDs || credentialIDs.length === 0) {
-    //   return res.status(404).json({
-    //     error: "Nenhum certificado BirdID ativo encontrado para este CPF.",
-    //   });
-    // }
+      receitaAssinadaBuffer = await PdfService.injectSignature(
+        receitaPreparada,
+        assinaturaReceita,
+      );
+    }
 
-    // 4. Retorna o ID da credencial (geralmente pegamos a primeira [0])
-    return res.status(200).json({
+    console.log("🎉 Documentos assinados com sucesso!");
+
+    // Retorna o sucesso para o frontend
+    res.status(200).json({
       success: true,
-      credentialId: "JOAO MARCOS SANTOS DA SILVA:02331822255",
-      accessToken,
+      message: "Documentos assinados com sucesso!",
+      urls: {
+        laudoBase64: laudoAssinadoBuffer
+          ? laudoAssinadoBuffer.toString("base64")
+          : null,
+        receitaBase64: receitaAssinadaBuffer
+          ? receitaAssinadaBuffer.toString("base64")
+          : null,
+      },
     });
   } catch (error) {
-    console.error(
-      "Erro ao buscar credencial:",
-      error.response?.data || error.message,
-    );
-    return res.status(500).json({
-      error: "Erro interno ao tentar localizar o certificado na Soluti.",
-    });
+    console.error("❌ Erro no processo de assinatura:", error);
+
+    // Tratamento de erro detalhado caso venha da API da Soluti (ex: OTP inválido)
+    if (error.response && error.response.data) {
+      return res.status(500).json({
+        error:
+          "Erro do provedor de assinatura: " +
+          JSON.stringify(error.response.data),
+      });
+    }
+
+    res
+      .status(500)
+      .json({ error: error.message || "Falha ao processar assinatura" });
   }
 });
 
