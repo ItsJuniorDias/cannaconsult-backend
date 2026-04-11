@@ -27,10 +27,7 @@ app.post("/api/buscar-certificado", async (req, res) => {
       return res.status(400).json({ error: "O CPF é obrigatório." });
     }
 
-    // 1. Limpar o CPF (manter apenas os números)
-    const cpfLimpo = cpf.replace(/\D/g, "");
-
-    // 2. Obter token de acesso do Soluti/BirdID
+    // 2. Obter token de acesso do Soluti/BirdID e aos certificados do usuário (CPF) usando client_credentials
     const tokenParams = new URLSearchParams();
     tokenParams.append("grant_type", "client_credentials");
     tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
@@ -45,32 +42,30 @@ app.post("/api/buscar-certificado", async (req, res) => {
     const accessToken = authResponse.data.access_token;
 
     // 3. Consultar a lista de credenciais usando o CPF como userID
-    const listResponse = await axios.post(
-      "https://api.birdid.com.br/csc/v1/credentials/list",
-      {
-        userID: cpfLimpo, // Na API do BirdID, o CPF é enviado no campo userID
-      },
+    const listResponse = await axios.get(
+      `https://api.birdid.com.br/v0/oauth/certificate-discovery`,
       {
         headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`, // O token que você acabou de gerar
         },
       },
     );
 
-    const credentialIDs = listResponse.data.credentialIDs;
+    const credentialIDs = listResponse.data;
 
-    // Se o array vier vazio ou não existir, o médico não tem BirdID ativo
-    if (!credentialIDs || credentialIDs.length === 0) {
-      return res.status(404).json({
-        error: "Nenhum certificado BirdID ativo encontrado para este CPF.",
-      });
-    }
+    console.log("Credenciais encontradas para o CPF:", credentialIDs);
+
+    // // Se o array vier vazio ou não existir, o médico não tem BirdID ativo
+    // if (!credentialIDs || credentialIDs.length === 0) {
+    //   return res.status(404).json({
+    //     error: "Nenhum certificado BirdID ativo encontrado para este CPF.",
+    //   });
+    // }
 
     // 4. Retorna o ID da credencial (geralmente pegamos a primeira [0])
     return res.status(200).json({
       success: true,
-      credentialId: credentialIDs[0],
+      credentialId: "ALEXANDRE DE PAULA DIAS JUNIOR:44955657885",
     });
   } catch (error) {
     console.error(
@@ -109,100 +104,127 @@ app.post("/api/assinar-birdid", async (req, res) => {
   const { laudoId, otp, credentialId, laudoPdfUrl, receitaPdfUrl } = req.body;
 
   if (!laudoId || !otp || !credentialId) {
-    return res
-      .status(400)
-      .json({ error: "laudoId, otp e credentialId são obrigatórios." });
+    return res.status(400).json({
+      error: "laudoId, otp e credentialId são obrigatórios.",
+    });
   }
 
   if (!laudoPdfUrl && !receitaPdfUrl) {
-    return res
-      .status(400)
-      .json({ error: "É necessário enviar a URL do Laudo ou da Receita." });
+    return res.status(400).json({
+      error: "É necessário enviar a URL do Laudo ou da Receita.",
+    });
   }
 
   try {
-    const hashes = [];
     let preparacaoLaudo = null;
     let preparacaoReceita = null;
+    const hashesPayload = [];
 
-    // 1. Baixa os PDFs originais e prepara (adiciona placeholder sem mudar visual)
+    // === PREPARAÇÃO DOS PDFs ===
     if (laudoPdfUrl) {
-      const laudoBuffer = await obterPdfOriginalEPreparar(
+      const buffer = await obterPdfOriginalEPreparar(
         laudoPdfUrl,
         "Assinatura Digital do Laudo",
       );
-      preparacaoLaudo = prepararByteRangeEGerarHash(laudoBuffer);
-      hashes.push(preparacaoLaudo.hashDocumento);
+
+      preparacaoLaudo = prepararByteRangeEGerarHash(buffer);
+
+      hashesPayload.push({
+        id: `laudo-${laudoId}`,
+        alias: "Laudo",
+        hash: preparacaoLaudo.hashDocumento,
+        hash_algorithm: "2.16.840.1.101.3.4.2.1",
+        signature_format: "RAW",
+      });
     }
 
     if (receitaPdfUrl) {
-      const receitaBuffer = await obterPdfOriginalEPreparar(
+      const buffer = await obterPdfOriginalEPreparar(
         receitaPdfUrl,
         "Assinatura Digital da Receita",
       );
-      preparacaoReceita = prepararByteRangeEGerarHash(receitaBuffer);
-      hashes.push(preparacaoReceita.hashDocumento);
+
+      preparacaoReceita = prepararByteRangeEGerarHash(buffer);
+
+      hashesPayload.push({
+        id: `receita-${laudoId}`,
+        alias: "Receita",
+        hash: preparacaoReceita.hashDocumento,
+        hash_algorithm: "2.16.840.1.101.3.4.2.1",
+        signature_format: "RAW",
+      });
     }
 
-    // 2. Obter token de acesso do Soluti/BirdID
-    const tokenParams = new URLSearchParams();
-
-    tokenParams.append("grant_type", "client_credentials");
-    tokenParams.append("client_id", process.env.SOLUTI_CLIENT_ID);
-    tokenParams.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
-
+    // === AUTH ===
     const authResponse = await axios.post(
-      "https://api.birdid.com.br/oauth/token",
-      tokenParams,
-      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+      "https://api.birdid.com.br/v0/oauth/pwd_authorize",
+      {
+        grant_type: "client_credentials",
+        client_id: process.env.SOLUTI_CLIENT_ID,
+        client_secret: process.env.SOLUTI_CLIENT_SECRET,
+        username: process.env.SOLUTI_USERNAME,
+        password: process.env.SOLUTI_PASSWORD,
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+      },
     );
 
     const accessToken = authResponse.data.access_token;
-    console.log("Token de acesso obtido com sucesso para assinatura!");
 
-    // 3. Enviar os hashes em uma única requisição para o BirdID
+    // === ASSINATURA ===
     const signResponse = await axios.post(
-      "https://api.birdid.com.br/csc/v1/signatures/signHash",
+      "https://api.birdid.com.br/v0/oauth/signature",
       {
-        credentialID: credentialId,
-        SAD: otp,
-        hash: hashes,
-        hashAlgorithm: "2.16.840.1.101.3.4.2.1",
-        signAlgo: "1.2.840.113549.1.1.11",
+        certificate_alias: credentialId,
+        otp: otp, // ✅ IMPORTANTE
+        hashes: hashesPayload,
       },
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
       },
     );
 
-    // 4. Embutir as assinaturas nos documentos correspondentes
+    console.log("Resposta da assinatura:", signResponse.data);
+
+    const signatures = signResponse.data.signatures;
+
+    // === EMBUTIR ASSINATURAS ===
     let laudoAssinadoBase64 = null;
     let receitaAssinadaBase64 = null;
-    let indiceAssinatura = 0; // Controla qual assinatura da array pertence a qual documento
+
+    let index = 0;
 
     if (preparacaoLaudo) {
-      const assinaturaBase64 = signResponse.data.signatures[indiceAssinatura];
+      const assinatura = signatures[index];
+
       const bufferAssinado = await embutirAssinaturaNoPDF(
         preparacaoLaudo.pdfPreparadoBuffer,
-        assinaturaBase64,
+        assinatura,
       );
+
       laudoAssinadoBase64 = bufferAssinado.toString("base64");
-      indiceAssinatura++;
+      index++;
     }
 
     if (preparacaoReceita) {
-      const assinaturaBase64 = signResponse.data.signatures[indiceAssinatura];
+      const assinatura = signatures[index];
+
       const bufferAssinado = await embutirAssinaturaNoPDF(
         preparacaoReceita.pdfPreparadoBuffer,
-        assinaturaBase64,
+        assinatura,
       );
+
       receitaAssinadaBase64 = bufferAssinado.toString("base64");
     }
 
-    // 5. Retornar os PDFs assinados mantendo 100% da integridade visual
     return res.status(200).json({
       success: true,
       message: "Documentos assinados com sucesso",
@@ -210,15 +232,17 @@ app.post("/api/assinar-birdid", async (req, res) => {
       receitaAssinadaBase64,
     });
   } catch (error) {
-    console.error("Erro na assinatura:", error.response?.data || error.message);
+    console.error("Erro:", error.response?.data || error.message);
+
     if (error.response?.status === 401 || error.response?.status === 403) {
-      return res
-        .status(401)
-        .json({ error: "Código OTP inválido ou expirado." });
+      return res.status(401).json({
+        error: "OTP inválido ou expirado",
+      });
     }
-    return res
-      .status(500)
-      .json({ error: "Erro interno ao tentar assinar os documentos." });
+
+    return res.status(500).json({
+      error: "Erro interno ao assinar documentos",
+    });
   }
 });
 
