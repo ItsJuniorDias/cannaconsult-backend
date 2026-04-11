@@ -66,6 +66,7 @@ app.post("/api/buscar-certificado", async (req, res) => {
     return res.status(200).json({
       success: true,
       credentialId: "JOAO MARCOS SANTOS DA SILVA:02331822255",
+      accessToken,
     });
   } catch (error) {
     console.error(
