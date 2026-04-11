@@ -16,6 +16,35 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.post("/api/gerar-hash-pdf", async (req, res) => {
+  try {
+    const { pdfLaudo, pdfReceita, motivo } = req.body;
+
+    if (!pdfLaudo || !pdfReceita || !motivo) {
+      return res
+        .status(400)
+        .json({ error: "pdfLaudo, pdfReceita e motivo são obrigatórios." });
+    }
+
+    const buffer = await obterPdfOriginalEPreparar(
+      pdfLaudo,
+      pdfReceita,
+      motivo,
+    );
+    const preparacao = prepararByteRangeEGerarHash(buffer);
+
+    return res.status(200).json({
+      success: true,
+      hash: preparacao.hashDocumento,
+    });
+  } catch (error) {
+    console.error("Erro ao gerar hash do PDF:", error.message);
+    return res.status(500).json({
+      error: "Erro interno ao processar o PDF.",
+    });
+  }
+});
+
 // ============================================================================
 // ENDPOINT PARA BUSCAR O CREDENTIAL ID PELO CPF
 // ============================================================================
@@ -128,7 +157,7 @@ app.post("/api/assinar-birdid", async (req, res) => {
         "Assinatura Digital do Laudo",
       );
 
-      preparacaoLaudo = prepararByteRangeEGerarHash(buffer);
+      preparacaoLaudo = prepararByteRangeEGerarHash(buffer.pdfLaudoBuffer);
 
       hashesPayload.push({
         id: `laudo-${laudoId}`,
@@ -141,11 +170,12 @@ app.post("/api/assinar-birdid", async (req, res) => {
 
     if (receitaPdfUrl) {
       const buffer = await obterPdfOriginalEPreparar(
+        pdfLaudoUrl,
         receitaPdfUrl,
         "Assinatura Digital da Receita",
       );
 
-      preparacaoReceita = prepararByteRangeEGerarHash(buffer);
+      preparacaoReceita = prepararByteRangeEGerarHash(buffer.pdfReceitaBuffer);
 
       hashesPayload.push({
         id: `receita-${laudoId}`,
@@ -252,19 +282,32 @@ app.post("/api/assinar-birdid", async (req, res) => {
 // ============================================================================
 
 // NOVA FUNÇÃO: Faz download do PDF já existente e insere a camada de assinatura
-async function obterPdfOriginalEPreparar(pdfUrl, motivo) {
+async function obterPdfOriginalEPreparar(pdfLaudoUrl, pdfReceitaUrl, motivo) {
   // Baixa o PDF do Firebase Storage (ou qualquer URL) como ArrayBuffer
-  const response = await axios.get(pdfUrl, { responseType: "arraybuffer" });
-  let pdfBuffer = Buffer.from(response.data);
+  const responseLaudo = await axios.get(pdfLaudoUrl, {
+    responseType: "arraybuffer",
+  });
+  let pdfLaudoBuffer = Buffer.from(responseLaudo.data);
+
+  const responseReceita = await axios.get(pdfReceitaUrl, {
+    responseType: "arraybuffer",
+  });
+  let pdfReceitaBuffer = Buffer.from(responseReceita.data);
 
   // Usa o @signpdf para alocar espaço para assinatura digital sem alterar a visão do documento
-  pdfBuffer = plainAddPlaceholder({
-    pdfBuffer,
+  pdfLaudoBuffer = plainAddPlaceholder({
+    pdfBuffer: pdfLaudoBuffer,
     reason: motivo,
     signatureLength: SIGNATURE_LENGTH,
   });
 
-  return pdfBuffer;
+  pdfReceitaBuffer = plainAddPlaceholder({
+    pdfBuffer: pdfReceitaBuffer,
+    reason: motivo,
+    signatureLength: SIGNATURE_LENGTH,
+  });
+
+  return { pdfLaudoBuffer, pdfReceitaBuffer };
 }
 
 function prepararByteRangeEGerarHash(pdfBuffer) {
