@@ -26,16 +26,26 @@ app.post("/api/gerar-hash-pdf", async (req, res) => {
         .json({ error: "pdfLaudo, pdfReceita e motivo são obrigatórios." });
     }
 
-    const buffer = await obterPdfOriginalEPreparar(
-      pdfLaudo,
-      pdfReceita,
-      motivo,
-    );
-    const preparacao = prepararByteRangeEGerarHash(buffer);
+    // 1. Gerar o hash do PDF usando SHA-256
+    const hashLaudo = crypto
+      .createHash("sha256")
+      .update(Buffer.from(pdfLaudo, "base64"))
+      .digest("hex");
 
+    const hashReceita = crypto
+      .createHash("sha256")
+      .update(Buffer.from(pdfReceita, "base64"))
+      .digest("hex");
+
+    console.log("Hash do Laudo:", hashLaudo);
+    console.log("Hash da Receita:", hashReceita);
+
+    // 2. Retornar os hashes e o motivo para o frontend
     return res.status(200).json({
       success: true,
-      hash: preparacao.hashDocumento,
+      hashLaudo,
+      hashReceita,
+      motivo,
     });
   } catch (error) {
     console.error("Erro ao gerar hash do PDF:", error.message);
@@ -125,244 +135,6 @@ async function verificarCaptcha(token) {
     console.error("Erro ao validar reCAPTCHA:", error.message);
     return false;
   }
-}
-
-// ============================================================================
-// ENDPOINT DE ASSINATURA BIRD ID (Preservando o visual original)
-// ============================================================================
-app.post("/api/assinar-birdid", async (req, res) => {
-  const { laudoId, otp, credentialId, laudoPdfUrl, receitaPdfUrl } = req.body;
-
-  if (!laudoId || !otp || !credentialId) {
-    return res.status(400).json({
-      error: "laudoId, otp e credentialId são obrigatórios.",
-    });
-  }
-
-  if (!laudoPdfUrl && !receitaPdfUrl) {
-    return res.status(400).json({
-      error: "É necessário enviar a URL do Laudo ou da Receita.",
-    });
-  }
-
-  try {
-    let preparacaoLaudo = null;
-    let preparacaoReceita = null;
-    const hashesPayload = [];
-
-    // === PREPARAÇÃO DOS PDFs ===
-    if (laudoPdfUrl) {
-      const buffer = await obterPdfOriginalEPreparar(
-        laudoPdfUrl,
-        "Assinatura Digital do Laudo",
-      );
-
-      preparacaoLaudo = prepararByteRangeEGerarHash(buffer.pdfLaudoBuffer);
-
-      hashesPayload.push({
-        id: `laudo-${laudoId}`,
-        alias: "Laudo",
-        hash: preparacaoLaudo.hashDocumento,
-        hash_algorithm: "2.16.840.1.101.3.4.2.1",
-        signature_format: "RAW",
-      });
-    }
-
-    if (receitaPdfUrl) {
-      const buffer = await obterPdfOriginalEPreparar(
-        pdfLaudoUrl,
-        receitaPdfUrl,
-        "Assinatura Digital da Receita",
-      );
-
-      preparacaoReceita = prepararByteRangeEGerarHash(buffer.pdfReceitaBuffer);
-
-      hashesPayload.push({
-        id: `receita-${laudoId}`,
-        alias: "Receita",
-        hash: preparacaoReceita.hashDocumento,
-        hash_algorithm: "2.16.840.1.101.3.4.2.1",
-        signature_format: "RAW",
-      });
-    }
-
-    // === AUTH ===
-    const authResponse = await axios.post(
-      "https://api.birdid.com.br/v0/oauth/pwd_authorize",
-      {
-        grant_type: "client_credentials",
-        client_id: process.env.SOLUTI_CLIENT_ID,
-        client_secret: process.env.SOLUTI_CLIENT_SECRET,
-        username: process.env.SOLUTI_USERNAME,
-        password: process.env.SOLUTI_PASSWORD,
-      },
-      {
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      },
-    );
-
-    const accessToken = authResponse.data.access_token;
-
-    // === ASSINATURA ===
-    const signResponse = await axios.post(
-      "https://api.birdid.com.br/v0/oauth/signature",
-      {
-        certificate_alias: credentialId,
-        otp: otp, // ✅ IMPORTANTE
-        hashes: hashesPayload,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-      },
-    );
-
-    console.log("Resposta da assinatura:", signResponse.data);
-
-    const signatures = signResponse.data.signatures;
-
-    // === EMBUTIR ASSINATURAS ===
-    let laudoAssinadoBase64 = null;
-    let receitaAssinadaBase64 = null;
-
-    let index = 0;
-
-    if (preparacaoLaudo) {
-      const assinatura = signatures[index];
-
-      const bufferAssinado = await embutirAssinaturaNoPDF(
-        preparacaoLaudo.pdfPreparadoBuffer,
-        assinatura,
-      );
-
-      laudoAssinadoBase64 = bufferAssinado.toString("base64");
-      index++;
-    }
-
-    if (preparacaoReceita) {
-      const assinatura = signatures[index];
-
-      const bufferAssinado = await embutirAssinaturaNoPDF(
-        preparacaoReceita.pdfPreparadoBuffer,
-        assinatura,
-      );
-
-      receitaAssinadaBase64 = bufferAssinado.toString("base64");
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Documentos assinados com sucesso",
-      laudoAssinadoBase64,
-      receitaAssinadaBase64,
-    });
-  } catch (error) {
-    console.error("Erro:", error.response?.data || error.message);
-
-    if (error.response?.status === 401 || error.response?.status === 403) {
-      return res.status(401).json({
-        error: "OTP inválido ou expirado",
-      });
-    }
-
-    return res.status(500).json({
-      error: "Erro interno ao assinar documentos",
-    });
-  }
-});
-
-// ============================================================================
-// FUNÇÕES AUXILIARES DE PDF
-// ============================================================================
-
-// NOVA FUNÇÃO: Faz download do PDF já existente e insere a camada de assinatura
-async function obterPdfOriginalEPreparar(pdfLaudoUrl, pdfReceitaUrl, motivo) {
-  // Baixa o PDF do Firebase Storage (ou qualquer URL) como ArrayBuffer
-  const responseLaudo = await axios.get(pdfLaudoUrl, {
-    responseType: "arraybuffer",
-  });
-  let pdfLaudoBuffer = Buffer.from(responseLaudo.data);
-
-  const responseReceita = await axios.get(pdfReceitaUrl, {
-    responseType: "arraybuffer",
-  });
-  let pdfReceitaBuffer = Buffer.from(responseReceita.data);
-
-  // Usa o @signpdf para alocar espaço para assinatura digital sem alterar a visão do documento
-  pdfLaudoBuffer = plainAddPlaceholder({
-    pdfBuffer: pdfLaudoBuffer,
-    reason: motivo,
-    signatureLength: SIGNATURE_LENGTH,
-  });
-
-  pdfReceitaBuffer = plainAddPlaceholder({
-    pdfBuffer: pdfReceitaBuffer,
-    reason: motivo,
-    signatureLength: SIGNATURE_LENGTH,
-  });
-
-  return { pdfLaudoBuffer, pdfReceitaBuffer };
-}
-
-function prepararByteRangeEGerarHash(pdfBuffer) {
-  const pdfString = pdfBuffer.toString("binary");
-
-  const byteRangePos = pdfString.indexOf("/ByteRange [");
-  if (byteRangePos === -1) throw new Error("Placeholder não encontrado.");
-
-  const byteRangeEnd = pdfString.indexOf("]", byteRangePos);
-  const signatureStart = pdfString.indexOf("<", byteRangeEnd);
-  const signatureEnd = pdfString.indexOf(">", signatureStart) + 1;
-
-  const byteRange = [
-    0,
-    signatureStart,
-    signatureEnd,
-    pdfBuffer.length - signatureEnd,
-  ];
-
-  const byteRangeString = `/ByteRange [${byteRange.join(" ")}]`;
-  const espacoOriginal = byteRangeEnd + 1 - byteRangePos;
-  const byteRangeFormatado = byteRangeString.padEnd(espacoOriginal, " ");
-
-  pdfBuffer.write(byteRangeFormatado, byteRangePos, espacoOriginal, "binary");
-
-  const hash = crypto.createHash("sha256");
-  hash.update(pdfBuffer.subarray(0, signatureStart));
-  hash.update(pdfBuffer.subarray(signatureEnd));
-
-  return {
-    pdfPreparadoBuffer: pdfBuffer,
-    hashDocumento: hash.digest("base64"),
-  };
-}
-
-async function embutirAssinaturaNoPDF(pdfPreparadoBuffer, signatureBase64) {
-  const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
-  const maxSignatureHexLength = SIGNATURE_LENGTH * 2;
-
-  if (signatureHex.length > maxSignatureHexLength) {
-    throw new Error("A assinatura é maior que o placeholder alocado.");
-  }
-
-  const paddedSignatureHex = signatureHex.padEnd(maxSignatureHexLength, "0");
-  const pdfString = pdfPreparadoBuffer.toString("binary");
-  const signatureStart = pdfString.indexOf("<") + 1;
-
-  pdfPreparadoBuffer.write(
-    paddedSignatureHex,
-    signatureStart,
-    maxSignatureHexLength,
-    "hex",
-  );
-
-  return pdfPreparadoBuffer;
 }
 
 // ============================================================================
