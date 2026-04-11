@@ -65,7 +65,7 @@ app.post("/api/buscar-certificado", async (req, res) => {
     // 4. Retorna o ID da credencial (geralmente pegamos a primeira [0])
     return res.status(200).json({
       success: true,
-      credentialId: "ALEXANDRE DE PAULA DIAS JUNIOR:44955657885",
+      credentialId: "JOAO MARCOS SANTOS DA SILVA:02331822255",
     });
   } catch (error) {
     console.error(
