@@ -21,7 +21,7 @@ class PdfService {
 
     addPlaceholder({
       pdfDoc: pdfDoc,
-      page: lastPage, // Aplica na última página
+      page: lastPage,
       reason: "Assinatura Medica BirdID",
       contactInfo: "contato@clinica.com.br",
       name: "João Marcos Santos da Silva",
@@ -34,11 +34,13 @@ class PdfService {
     let finalBuffer = Buffer.from(pdfBytes);
     const pdfString = finalBuffer.toString("binary");
 
-    // 🔴 Matemática exata para deixar o '<' e o '>' fora do Hash, mas dentro do arquivo
+    // 🔴 MATEMÁTICA OFICIAL: O '<' e o '>' agora ficam dentro do Hash!
     const contentsStart = pdfString.lastIndexOf("/Contents <");
-    const length1 = contentsStart + 10; // Aponta EXATAMENTE para o '<'
-    const contentsEndOffset = pdfString.indexOf(">", length1);
-    const start2 = contentsEndOffset + 1; // Aponta EXATAMENTE para logo após o '>'
+    const signatureGapStart = contentsStart + 11; // Aponta EXATAMENTE para o primeiro '0' após o '<'
+    const signatureGapEnd = pdfString.indexOf(">", signatureGapStart); // Aponta EXATAMENTE para o '>'
+
+    const length1 = signatureGapStart;
+    const start2 = signatureGapEnd;
     const length2 = finalBuffer.length - start2;
 
     const byteRangeStart = pdfString.lastIndexOf("/ByteRange");
@@ -82,25 +84,24 @@ class PdfService {
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
     const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
 
-    const signatureStart = byteRangeMatch.slice(1).map(Number)[1]; // Aponta para o '<'
-    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2]; // Aponta logo após o '>'
+    // A extração perfeita: Corta exatamente nos limites dos zeros, mantendo '<' e '>' originais
+    const signatureStart = byteRangeMatch.slice(1).map(Number)[1];
+    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2];
 
-    // O tamanho do buraco inclui o '<' e o '>'. Então subtraímos 2 para o hex.
-    const gapSize = signatureEnd - signatureStart;
-    const hexSpace = gapSize - 2;
+    const reservedSpaceSize = signatureEnd - signatureStart;
 
-    signatureHex = signatureHex.padEnd(hexSpace, "0");
+    signatureHex = signatureHex.padEnd(reservedSpaceSize, "0");
 
-    if (signatureHex.length > hexSpace) {
+    if (signatureHex.length > reservedSpaceSize) {
       throw new Error(
         "A assinatura PKCS7 retornada é maior que o espaço reservado.",
       );
     }
 
-    // 🔴 A CORREÇÃO MESTRA: Colocando o '<' e o '>' de volta no Buffer final!
+    // Injeta a assinatura diretamente no lugar dos zeros
     return Buffer.concat([
       pdfWithPlaceholderBuffer.subarray(0, signatureStart),
-      Buffer.from(`<${signatureHex}>`, "binary"),
+      Buffer.from(signatureHex, "binary"),
       pdfWithPlaceholderBuffer.subarray(signatureEnd),
     ]);
   }
