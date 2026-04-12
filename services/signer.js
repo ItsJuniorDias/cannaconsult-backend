@@ -56,7 +56,9 @@ class CustomSigner {
     p7.signers[0].signature = forge.util.decode64(rawBirdIdSignatureBase64);
 
     // 6. Transforma o envelope completo e finalizado em Hexadecimal
-    const asn1 = forge.pkcs7.toAsn1(p7);
+    // 🔴 A CORREÇÃO É AQUI: O método pertence à instância p7, e não à classe global!
+    const asn1 = p7.toAsn1();
+
     const der = forge.asn1.toDer(asn1).getBytes();
     return Buffer.from(der, "binary").toString("hex");
   }
