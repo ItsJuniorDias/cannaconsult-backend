@@ -43,7 +43,9 @@ class SolutiService {
   // mas o token OAuth (se gerado via front) já costuma estar autorizado.
   static async signHash(hashBase64, accessToken, otp = null) {
     try {
-      console.log("[Soluti] Enviando Hash para a BirdID...");
+      console.log(
+        "[Soluti] Enviando Hash para a BirdID (Solicitando PKCS7)...",
+      );
 
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
@@ -54,7 +56,7 @@ class SolutiService {
               alias: "Documento Medico",
               hash: hashBase64,
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
-              signature_format: "RAW",
+              signature_format: "PKCS7", // 🔴 MUDANÇA CRÍTICA AQUI!
             },
           ],
         },
@@ -67,51 +69,33 @@ class SolutiService {
         },
       );
 
-      // --- TRECHO ATUALIZADO A PARTIR DAQUI ---
       if (
         response.data &&
         response.data.signatures &&
         response.data.signatures.length > 0
       ) {
-        console.log(
-          "[Soluti] ✅ Assinatura autorizada! Analisando o pacote retornado...",
-        );
-
         const assinatura = response.data.signatures[0];
         let assinaturaBase64 = null;
 
         if (typeof assinatura === "string") {
-          // Cenário 1: Retornou direto um array de strings
           assinaturaBase64 = assinatura;
         } else if (typeof assinatura === "object") {
-          // Cenário 2: Retornou um array de objetos. Vamos caçar o Base64.
-          // A BirdID pode usar 'signature', 'signed_hash', 'pkcs7', etc.
+          // Agora ele vai caçar o formato PKCS7 ou RAW
           assinaturaBase64 =
-            assinatura.raw_signature ||
-            assinatura.signature ||
-            assinatura.signed_hash ||
             assinatura.pkcs7 ||
-            assinatura.hash;
-
-          // Tratamento extra: Se a BirdID retornar sucesso no HTTP, mas erro no payload
-          if (assinatura.error || assinatura.status === "error") {
-            throw new Error(
-              `A BirdID retornou um erro interno: ${assinatura.error || assinatura.message}`,
-            );
-          }
+            assinatura.signature ||
+            assinatura.raw_signature ||
+            assinatura.signed_hash;
         }
 
         if (!assinaturaBase64) {
-          // Se ainda assim vier vazio, o nosso catch vai mostrar exatamente o que eles mandaram
           throw new Error(
             "Estrutura não reconhecida pela extração: " +
               JSON.stringify(assinatura),
           );
         }
 
-        console.log(
-          "[Soluti] ✅ Base64 extraído com sucesso! Repassando para o PDF...",
-        );
+        console.log("[Soluti] ✅ Base64 PKCS7 gerado com sucesso!");
         return assinaturaBase64;
       } else {
         throw new Error(
@@ -119,18 +103,8 @@ class SolutiService {
         );
       }
     } catch (error) {
-      console.error(
-        "[Soluti] ❌ Erro na Assinatura (Status):",
-        error.response?.status,
-      );
-      console.error(
-        "[Soluti] ❌ Detalhes:",
-        JSON.stringify(error.response?.data, null, 2) || error.message,
-      );
-
-      throw new Error(
-        `Falha na assinatura. Erro: ${error.response?.data?.error_description || error.message}`,
-      );
+      console.error("[Soluti] ❌ Erro:", error.response?.data || error.message);
+      throw new Error(`Falha na assinatura.`);
     }
   }
 }
