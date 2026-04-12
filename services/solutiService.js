@@ -1,4 +1,4 @@
-// solutiService.js (Versão Corrigida para BirdID Nativo)
+// solutiService.js (Versão Final com Limpeza de Base64)
 const axios = require("axios");
 
 class SolutiService {
@@ -38,9 +38,6 @@ class SolutiService {
     }
   }
 
-  // A sua controller passava o 'otp' como 3º parâmetro,
-  // adicionei ele aqui caso você precise para os logs,
-  // mas o token OAuth (se gerado via front) já costuma estar autorizado.
   static async signHash(hashBase64, accessToken, otp = null) {
     try {
       console.log(
@@ -56,8 +53,8 @@ class SolutiService {
               alias: "Documento Medico",
               hash: hashBase64,
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
-              signature_format: "PKCS7", // 🔴 MUDANÇA CRÍTICA AQUI!
-              include_chain: true,
+              signature_format: "PKCS7", // Solicitando o envelope completo
+              include_chain: true, // Incluindo a cadeia de certificados
             },
           ],
         },
@@ -81,7 +78,7 @@ class SolutiService {
         if (typeof assinatura === "string") {
           assinaturaBase64 = assinatura;
         } else if (typeof assinatura === "object") {
-          // Agora ele vai caçar o formato PKCS7 ou RAW
+          // Caça o formato PKCS7 ou RAW nas propriedades mais comuns
           assinaturaBase64 =
             assinatura.pkcs7 ||
             assinatura.signature ||
@@ -96,8 +93,16 @@ class SolutiService {
           );
         }
 
-        console.log("[Soluti] ✅ Base64 PKCS7 gerado com sucesso!");
-        return assinaturaBase64;
+        // 👇 A CORREÇÃO MÁGICA (LIMPEZA DO PEM E QUEBRAS DE LINHA) 👇
+        const cleanBase64 = assinaturaBase64
+          .replace(/-----(BEGIN|END)[^-]+-----/g, "") // Remove -----BEGIN PKCS7-----
+          .replace(/[\r\n\t ]/g, ""); // Remove quebras de linha e espaços invisíveis
+
+        console.log(
+          "[Soluti] ✅ Base64 PKCS7 purificado com sucesso! Repassando para o PDF...",
+        );
+
+        return cleanBase64;
       } else {
         throw new Error(
           "A BirdID retornou sucesso, mas o array de assinaturas veio vazio.",
