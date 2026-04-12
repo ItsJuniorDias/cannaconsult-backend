@@ -12,6 +12,8 @@ class SolutiService {
       params.append("redirect_uri", process.env.SOLUTI_REDIRECT_URI);
       params.append("code_verifier", codeVerifier);
 
+      params.append("scope", "signature_session");
+
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/token`,
         params,
