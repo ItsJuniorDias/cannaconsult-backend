@@ -1,4 +1,5 @@
-const { pdfLibAddPlaceholder } = require("@signpdf/placeholder-pdf-lib");
+// pdfService.js (Versão Produção)
+const { pdflibAddPlaceholder } = require("@signpdf/placeholder-pdf-lib"); // <-- Corrigido (L minúsculo)
 const { PDFDocument } = require("pdf-lib");
 const crypto = require("crypto");
 
@@ -14,9 +15,10 @@ class PdfService {
 
     const signatureLength = 16384;
 
-    // IMPORTANTE: pdfLibAddPlaceholder recebe o objeto 'pdfDoc', não o buffer!
+    // IMPORTANTE: pdflibAddPlaceholder recebe o objeto 'pdfDoc', não o buffer!
     // Ele insere o placeholder diretamente na instância do documento.
-    pdfLibAddPlaceholder({
+    pdflibAddPlaceholder({
+      // <-- Corrigido (L minúsculo)
       pdfDoc: pdfDoc,
       reason: "Assinatura Digital BirdID",
       signatureLength: signatureLength,
