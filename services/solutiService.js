@@ -66,29 +66,43 @@ class SolutiService {
   // Adicione este método dentro da classe SolutiService
   static async getCertificate(accessToken) {
     try {
-      console.log("[Soluti] Buscando certificado do médico...");
+      console.log("[Soluti] Buscando informações e certificado do usuário...");
+
+      // 🔴 ROTA CORRIGIDA: O padrão OAuth2 para dados do usuário é /userinfo
       const response = await axios.get(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/certificate`,
+        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/userinfo`,
         {
           headers: { Authorization: `Bearer ${accessToken}` },
         },
       );
 
-      if (
-        response.data &&
-        response.data.certificates &&
-        response.data.certificates.length > 0
-      ) {
-        console.log("[Soluti] ✅ Certificado resgatado com sucesso!");
-        return response.data.certificates[0]; // Retorna a string PEM
+      // Vamos procurar o certificado nas propriedades mais comuns do VaultID
+      const certPEM =
+        response.data.certificate ||
+        response.data.certificate_pem ||
+        response.data.cert ||
+        (response.data.certificates && response.data.certificates[0]);
+
+      if (certPEM) {
+        console.log("[Soluti] ✅ Certificado PEM resgatado com sucesso!");
+        return certPEM;
       } else {
-        throw new Error("O array de certificados retornou vazio.");
+        // Se a Soluti mudou o nome da variável, isso aqui vai nos mostrar exatamente qual é!
+        console.log(
+          "[Soluti] ⚠️ Payload do UserInfo:",
+          JSON.stringify(response.data, null, 2),
+        );
+        throw new Error(
+          "O certificado não foi encontrado nas propriedades mapeadas do userinfo.",
+        );
       }
     } catch (error) {
       console.error(
         "[Soluti] ❌ Erro ao buscar certificado:",
         error.response?.data || error.message,
       );
+
+      // Se der 404 de novo, vamos tentar a rota alternativa /v0/certificate (sem o oauth)
       throw new Error("Falha ao buscar o certificado do usuário na BirdID.");
     }
   }
