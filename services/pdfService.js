@@ -1,16 +1,25 @@
 // pdfService.js (Versão Produção)
 const { plainAddPlaceholder } = require("@signpdf/placeholder-plain");
+const { PDFDocument } = require("pdf-lib"); // Adicione a importação do pdf-lib
 const crypto = require("crypto");
 
 class PdfService {
   // 1. Prepara o PDF com o espaço para a assinatura padrão PAdES
-  static preparePdf(pdfBuffer) {
-    // Define o tamanho da assinatura (8192 bytes é padrão seguro para RSA 2048/4096)
-    const signatureLength = 8192;
+  static async preparePdf(pdfBuffer) {
+    // Transforme em async
+
+    // PASSO NOVO: Normalizar o PDF removendo os Object Streams
+    const pdfDoc = await PDFDocument.load(pdfBuffer);
+    const normalizedBytes = await pdfDoc.save({ useObjectStreams: false });
+    const normalizedBuffer = Buffer.from(normalizedBytes);
+
+    // DICA: 8192 pode ser pequeno para algumas cadeias da Soluti/BirdID.
+    // Se der erro de "Assinatura retornada é maior...", aumente para 16384.
+    const signatureLength = 16384;
 
     // plainAddPlaceholder cria o dicionário de assinatura e o ByteRange correto
     const pdfWithPlaceholder = plainAddPlaceholder({
-      pdfBuffer,
+      pdfBuffer: normalizedBuffer, // Passa o buffer normalizado!
       reason: "Assinatura Digital BirdID",
       signatureLength: signatureLength,
     });
@@ -20,19 +29,17 @@ class PdfService {
 
   // 2. Extrai exatamente o que precisa ser "hasheado"
   static calculateHashForSigning(pdfWithPlaceholderBuffer) {
-    // O Adobe Acrobat lê o ByteRange: [inicio1, tamanho1, inicio2, tamanho2]
-    // Precisamos pegar o documento inteiro, exceto o "buraco" onde vai a assinatura
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
 
     const byteRangeMatch = pdfString.match(
       /\/ByteRange\s*\[(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\]/,
     );
-    if (!byteRangeMatch)
+    if (!byteRangeMatch) {
       throw new Error("Não foi possível encontrar o ByteRange no PDF");
+    }
 
     const byteRange = byteRangeMatch.slice(1).map(Number);
 
-    // Pega a primeira e a segunda parte do PDF em volta do placeholder
     const part1 = pdfWithPlaceholderBuffer.subarray(
       byteRange[0],
       byteRange[0] + byteRange[1],
@@ -42,7 +49,6 @@ class PdfService {
       byteRange[2] + byteRange[3],
     );
 
-    // Junta as partes e gera o Hash SHA-256
     const documentToHash = Buffer.concat([part1, part2]);
     const hash = crypto
       .createHash("sha256")
@@ -54,21 +60,19 @@ class PdfService {
 
   // 3. Injeta a assinatura de volta no local exato
   static injectSignature(pdfWithPlaceholderBuffer, signatureBase64) {
-    // Converte a assinatura recebida (PKCS#7) em Hexadecimal
     const signatureBuffer = Buffer.from(signatureBase64, "base64");
     let signatureHex = signatureBuffer.toString("hex");
 
-    // Pega o tamanho original reservado (precisamos preencher todo o espaço)
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
     const byteRangeMatch = pdfString.match(
       /\/ByteRange\s*\[(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\]/,
     );
-    const signatureStart = byteRangeMatch.slice(1).map(Number)[1] + 1; // +1 para pular o "<"
-    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2] - 1; // -1 para parar antes do ">"
+
+    const signatureStart = byteRangeMatch.slice(1).map(Number)[1] + 1;
+    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2] - 1;
 
     const reservedSpaceSize = signatureEnd - signatureStart;
 
-    // Completa o resto do espaço reservado com zeros (padding padrão PDF)
     signatureHex = signatureHex.padEnd(reservedSpaceSize, "0");
 
     if (signatureHex.length > reservedSpaceSize) {
@@ -77,7 +81,6 @@ class PdfService {
       );
     }
 
-    // Substitui os zeros do placeholder pela assinatura real
     const finalPdfBuffer = Buffer.concat([
       pdfWithPlaceholderBuffer.subarray(0, signatureStart),
       Buffer.from(signatureHex, "binary"),
