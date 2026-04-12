@@ -1,5 +1,6 @@
 // services/pdfService.js
 const { PDFDocument } = require("pdf-lib");
+const crypto = require("crypto");
 
 class PdfService {
   static async preparePdf(pdfBuffer) {
@@ -17,7 +18,7 @@ class PdfService {
       page: lastPage,
       reason: "Assinatura Medica",
       contactInfo: "contato@cannaconsult.com.br",
-      name: "Dr(a). Medico Responsavel",
+      name: "Assinatura Digital BirdID",
       location: "Brasil",
       signatureLength: 16384,
       widgetRect: [50, 50, 250, 100],
@@ -33,10 +34,8 @@ class PdfService {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = finalBuffer.lastIndexOf(contentsTag);
 
-    // 🔴 A CORREÇÃO DE 1 BYTE: O corte agora é +11.
-    // Ele aponta EXATAMENTE para o primeiro "0", deixando o "<" em segurança.
     const hexStart = contentsPos + 11;
-    const hexEnd = finalBuffer.indexOf(">", hexStart); // Aponta para o ">"
+    const hexEnd = finalBuffer.indexOf(">", hexStart);
 
     const length1 = hexStart;
     const start2 = hexEnd;
@@ -54,38 +53,39 @@ class PdfService {
     return finalBuffer;
   }
 
-  // Extrai o buffer do PDF mantendo o < e o > dentro do Hash perfeitamente
-  static getDocumentBufferToHash(buffer) {
+  static calculateHashForSigning(buffer) {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
     const hexStart = contentsPos + 11;
     const hexEnd = buffer.indexOf(">", hexStart);
 
-    const part1 = buffer.subarray(0, hexStart); // Inclui tudo até o "<"
-    const part2 = buffer.subarray(hexEnd); // Inclui tudo a partir do ">"
+    const part1 = buffer.subarray(0, hexStart);
+    const part2 = buffer.subarray(hexEnd);
 
-    return Buffer.concat([part1, part2]);
+    const documentToHash = Buffer.concat([part1, part2]);
+    return crypto.createHash("sha256").update(documentToHash).digest("base64");
   }
 
-  static injectSignature(buffer, signatureHex) {
+  static injectSignature(buffer, signatureBase64) {
+    // 🔴 LIMPEZA DE SEGURANÇA: Remove formatos PEM e quebras de linha que corrompem o PDF
+    const cleanB64 = signatureBase64
+      .replace(/-----(BEGIN|END)[^-]+-----/g, "")
+      .replace(/[\r\n\t ]/g, "");
+
+    const signatureHex = Buffer.from(cleanB64, "base64").toString("hex");
+
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
     const hexStart = contentsPos + 11;
     const hexEnd = buffer.indexOf(">", hexStart);
 
-    // O espaço para os números é puramente a distância entre os caracteres < e >
     const availableSpace = hexEnd - hexStart;
 
     if (signatureHex.length > availableSpace) {
-      throw new Error(
-        `Assinatura estourou o limite de ${availableSpace} bytes.`,
-      );
+      throw new Error(`Assinatura estourou o limite de bytes.`);
     }
 
     const paddedHex = signatureHex.padEnd(availableSpace, "0");
-
-    // 🔴 INJEÇÃO CIRÚRGICA: Nós sobrescrevemos APENAS os zeros.
-    // O < e o > originais do arquivo nunca são tocados ou removidos.
     buffer.write(paddedHex, hexStart, availableSpace, "ascii");
 
     return buffer;

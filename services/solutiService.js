@@ -39,7 +39,7 @@ class SolutiService {
   }
 
   // solutiService.js (Trecho atualizado)
-  static async signHash(hashDosAtributos, accessToken) {
+  static async signHash(hashBase64, accessToken) {
     try {
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
@@ -47,9 +47,10 @@ class SolutiService {
           hashes: [
             {
               id: "1",
-              hash: hashDosAtributos,
+              hash: hashBase64,
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
-              signature_format: "RAW", // 🔴 CRÍTICO: Agora pedimos RAW!
+              signature_format: "CMS", // 🔴 A MÁGICA: A BirdID monta o envelope completo!
+              include_chain: true, // 🔴 Inclui a cadeia ICP-Brasil
             },
           ],
         },
@@ -57,10 +58,8 @@ class SolutiService {
       );
 
       const sig = response.data.signatures[0];
-      const assinaturaRaw = sig.raw_signature || sig.signature;
-
-      // Limpa possíveis lixos do Base64
-      return assinaturaRaw.replace(/[\r\n\t ]/g, "");
+      // Pega o envelope Base64 retornado
+      return sig.signature || sig.pkcs7 || sig.cms || sig.raw_signature;
     } catch (error) {
       throw new Error("Falha na API da BirdID.");
     }

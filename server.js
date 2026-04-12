@@ -6,9 +6,9 @@ const crypto = require("crypto");
 const axios = require("axios");
 
 const helmet = require("helmet");
+
 const SolutiService = require("./services/solutiService");
 const PdfService = require("./services/pdfService");
-const CustomSigner = require("./services/signer");
 
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
@@ -96,48 +96,56 @@ app.post("/api/sign", async (req, res) => {
       return res.status(400).json({ error: "Nenhum PDF encontrado." });
     }
 
-    // 1. Pega o Certificado Oficial
-    const medicoCertPEM = await SolutiService.getCertificate(token);
+    // 🔴 REMOVIDO: A busca de certificado e o CustomSigner foram pro lixo!
+    // A API da BirdID agora faz o trabalho pesado de montar o CMS.
 
     let laudoAssinado = null;
     let receitaAssinada = null;
 
+    // ==========================================
     // --- LAUDO ---
+    // ==========================================
     if (pdfLaudoBuffer) {
+      console.log("⚙️ Processando Laudo...");
+
+      // 1. Abre a fresta perfeita no PDF e extrai o Hash original
       const laudoPrep = await PdfService.preparePdf(pdfLaudoBuffer);
-      const laudoBufferHash = PdfService.getDocumentBufferToHash(laudoPrep);
+      const laudoHash = PdfService.calculateHashForSigning(laudoPrep);
 
-      // Cria a estrutura PAdES e extrai o hash para a BirdID
-      const { p7, hashToSignBirdID } = CustomSigner.prepareEnvelope(
-        laudoBufferHash,
-        medicoCertPEM,
+      // 2. Manda o Hash para a Soluti, que devolve o envelope CMS completo (com certificado embutido)
+      const assinaturaCMSBase64 = await SolutiService.signHash(
+        laudoHash,
+        token,
       );
 
-      // Carimba na BirdID
-      const rawSig = await SolutiService.signHash(hashToSignBirdID, token);
-
-      // Finaliza a estrutura e injeta
-      const envelopeHex = CustomSigner.finishEnvelope(p7, rawSig);
-      laudoAssinado = await PdfService.injectSignature(laudoPrep, envelopeHex);
+      // 3. Injeta a assinatura cirurgicamente no PDF
+      laudoAssinado = PdfService.injectSignature(
+        laudoPrep,
+        assinaturaCMSBase64,
+      );
     }
 
+    // ==========================================
     // --- RECEITA ---
+    // ==========================================
     if (pdfReceitaBuffer) {
+      console.log("⚙️ Processando Receita...");
+
       const receitaPrep = await PdfService.preparePdf(pdfReceitaBuffer);
-      const receitaBufferHash = PdfService.getDocumentBufferToHash(receitaPrep);
+      const receitaHash = PdfService.calculateHashForSigning(receitaPrep);
 
-      const { p7, hashToSignBirdID } = CustomSigner.prepareEnvelope(
-        receitaBufferHash,
-        medicoCertPEM,
+      const assinaturaCMSBase64 = await SolutiService.signHash(
+        receitaHash,
+        token,
       );
-      const rawSig = await SolutiService.signHash(hashToSignBirdID, token);
 
-      const envelopeHex = CustomSigner.finishEnvelope(p7, rawSig);
-      receitaAssinada = await PdfService.injectSignature(
+      receitaAssinada = PdfService.injectSignature(
         receitaPrep,
-        envelopeHex,
+        assinaturaCMSBase64,
       );
     }
+
+    console.log("🎉 Documentos processados e assinados!");
 
     res.status(200).json({
       success: true,
