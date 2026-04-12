@@ -10,6 +10,10 @@ class PdfService {
     console.log("[PdfService] 1. Carregando PDF...");
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
+    // Pega a última página para colocar o carimbo
+    const pages = pdfDoc.getPages();
+    const lastPage = pages[pages.length - 1];
+
     const placeholderPkg = require("@signpdf/placeholder-pdf-lib");
     const addPlaceholder =
       placeholderPkg.pdflibAddPlaceholder ||
@@ -17,25 +21,24 @@ class PdfService {
 
     addPlaceholder({
       pdfDoc: pdfDoc,
+      page: lastPage, // Aplica na última página
       reason: "Assinatura Medica BirdID",
       contactInfo: "contato@clinica.com.br",
       name: "João Marcos Santos da Silva",
       location: "Brasil",
       signatureLength: 16384,
+      widgetRect: [50, 50, 250, 100],
     });
 
     const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
     let finalBuffer = Buffer.from(pdfBytes);
-
     const pdfString = finalBuffer.toString("binary");
 
+    // 🔴 Matemática exata para deixar o '<' e o '>' fora do Hash, mas dentro do arquivo
     const contentsStart = pdfString.lastIndexOf("/Contents <");
-    const contentsStartOffset = contentsStart + 11;
-    // 🔴 REMOVIDO o "+1" daqui para alinhar perfeitamente com o ">"
-    const contentsEndOffset = pdfString.indexOf(">", contentsStartOffset);
-
-    const length1 = contentsStartOffset;
-    const start2 = contentsEndOffset;
+    const length1 = contentsStart + 10; // Aponta EXATAMENTE para o '<'
+    const contentsEndOffset = pdfString.indexOf(">", length1);
+    const start2 = contentsEndOffset + 1; // Aponta EXATAMENTE para logo após o '>'
     const length2 = finalBuffer.length - start2;
 
     const byteRangeStart = pdfString.lastIndexOf("/ByteRange");
@@ -79,23 +82,25 @@ class PdfService {
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
     const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
 
-    // 🔴 REMOVIDOS os "+1" e "-1" daqui. Agora a matemática é milimetricamente exata.
-    const signatureStart = byteRangeMatch.slice(1).map(Number)[1];
-    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2];
+    const signatureStart = byteRangeMatch.slice(1).map(Number)[1]; // Aponta para o '<'
+    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2]; // Aponta logo após o '>'
 
-    const reservedSpaceSize = signatureEnd - signatureStart;
+    // O tamanho do buraco inclui o '<' e o '>'. Então subtraímos 2 para o hex.
+    const gapSize = signatureEnd - signatureStart;
+    const hexSpace = gapSize - 2;
 
-    signatureHex = signatureHex.padEnd(reservedSpaceSize, "0");
+    signatureHex = signatureHex.padEnd(hexSpace, "0");
 
-    if (signatureHex.length > reservedSpaceSize) {
+    if (signatureHex.length > hexSpace) {
       throw new Error(
-        "A assinatura PKCS7 retornada é maior que o espaço de 16384 bytes.",
+        "A assinatura PKCS7 retornada é maior que o espaço reservado.",
       );
     }
 
+    // 🔴 A CORREÇÃO MESTRA: Colocando o '<' e o '>' de volta no Buffer final!
     return Buffer.concat([
       pdfWithPlaceholderBuffer.subarray(0, signatureStart),
-      Buffer.from(signatureHex, "binary"),
+      Buffer.from(`<${signatureHex}>`, "binary"),
       pdfWithPlaceholderBuffer.subarray(signatureEnd),
     ]);
   }
