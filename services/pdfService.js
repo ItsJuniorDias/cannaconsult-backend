@@ -1,9 +1,6 @@
 // services/pdfService.js
 const { PDFDocument } = require("pdf-lib");
 
-const BYTE_RANGE_REGEX =
-  /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/;
-
 class PdfService {
   static async preparePdf(pdfBuffer) {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
@@ -33,14 +30,15 @@ class PdfService {
     const byteRangeEnd = finalBuffer.indexOf("]", byteRangeStart) + 1;
     const originalByteRangeLength = byteRangeEnd - byteRangeStart;
 
+    // 🔴 A MATEMÁTICA SIMÉTRICA: A fresta agora engloba EXATAMENTE do '<' ao '>'
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = finalBuffer.lastIndexOf(contentsTag);
 
-    const signatureStart = contentsPos + contentsTag.length;
-    const signatureEnd = finalBuffer.indexOf(">", signatureStart);
+    const signatureGapStart = contentsPos + 10; // Aponta EXATAMENTE para o '<'
+    const signatureGapEnd = finalBuffer.indexOf(">", signatureGapStart) + 1; // Aponta EXATAMENTE para logo após o '>'
 
-    const length1 = signatureStart;
-    const start2 = signatureEnd + 1;
+    const length1 = signatureGapStart;
+    const start2 = signatureGapEnd;
     const length2 = finalBuffer.length - start2;
 
     let realByteRange = `/ByteRange [0 ${length1} ${start2} ${length2}]`;
@@ -55,15 +53,15 @@ class PdfService {
     return finalBuffer;
   }
 
-  // Devolve o Buffer cortado para o node-forge montar a estrutura
+  // Extrai o buffer do PDF ignorando totalmente a fresta (sem o < e sem o >)
   static getDocumentBufferToHash(buffer) {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
-    const signatureStart = contentsPos + contentsTag.length;
-    const signatureEnd = buffer.indexOf(">", signatureStart);
+    const signatureGapStart = contentsPos + 10;
+    const signatureGapEnd = buffer.indexOf(">", signatureGapStart) + 1;
 
-    const part1 = buffer.subarray(0, signatureStart);
-    const part2 = buffer.subarray(signatureEnd + 1);
+    const part1 = buffer.subarray(0, signatureGapStart);
+    const part2 = buffer.subarray(signatureGapEnd);
 
     return Buffer.concat([part1, part2]);
   }
@@ -71,10 +69,11 @@ class PdfService {
   static injectSignature(buffer, signatureHex) {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
-    const signatureStart = contentsPos + contentsTag.length;
-    const signatureEnd = buffer.indexOf(">", signatureStart);
+    const signatureGapStart = contentsPos + 10;
+    const signatureGapEnd = buffer.indexOf(">", signatureGapStart) + 1;
 
-    const availableSpace = signatureEnd - signatureStart;
+    // O espaço disponível para os números é o tamanho da fresta menos os símbolos < e >
+    const availableSpace = signatureGapEnd - signatureGapStart - 2;
 
     if (signatureHex.length > availableSpace) {
       throw new Error(
@@ -83,7 +82,14 @@ class PdfService {
     }
 
     const paddedHex = signatureHex.padEnd(availableSpace, "0");
-    buffer.write(paddedHex, signatureStart, availableSpace, "ascii");
+
+    // 🔴 O TOQUE DE MESTRE: Reescrevemos o < e o > ao redor do código Hexadecimal
+    buffer.write(
+      `<${paddedHex}>`,
+      signatureGapStart,
+      availableSpace + 2,
+      "ascii",
+    );
 
     return buffer;
   }
