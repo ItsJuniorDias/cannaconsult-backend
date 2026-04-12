@@ -5,6 +5,7 @@
     "": {
       "name": "cannaconsult-backend",
       "dependencies": {
+        "@signpdf/placeholder-pdf-lib": "^3.3.0",
         "@signpdf/placeholder-plain": "^3.3.0",
         "@signpdf/signpdf": "^3.3.0",
         "@signpdf/utils": "^3.3.0",
@@ -24,6 +25,8 @@
     "@pdf-lib/standard-fonts": ["@pdf-lib/standard-fonts@1.0.0", "", { "dependencies": { "pako": "^1.0.6" } }, "sha512-hU30BK9IUN/su0Mn9VdlVKsWBS6GyhVfqjwl1FjZN4TxP6cCw0jP2w7V3Hf5uX7M0AZJ16vey9yE0ny7Sa59ZA=="],
 
     "@pdf-lib/upng": ["@pdf-lib/upng@1.0.1", "", { "dependencies": { "pako": "^1.0.10" } }, "sha512-dQK2FUMQtowVP00mtIksrlZhdFXQZPC+taih1q4CvPZ5vqdxR/LKBaFg0oAfzd1GlHZXXSPdQfzQnt+ViGvEIQ=="],
+
+    "@signpdf/placeholder-pdf-lib": ["@signpdf/placeholder-pdf-lib@3.3.0", "", { "dependencies": { "@signpdf/utils": "^3.3.0" }, "peerDependencies": { "pdf-lib": "^1.17.1" } }, "sha512-DT1s617z88NvvCmo+z8jaz7lNzy7b7/fwo/movJGukpfSkl4FaLNRXIHNBCTRCP9TUb6F/axK1JulES/jY7mLQ=="],
 
     "@signpdf/placeholder-pdfkit010": ["@signpdf/placeholder-pdfkit010@3.3.0", "", { "dependencies": { "@signpdf/utils": "^3.3.0" }, "peerDependencies": { "pdfkit": "~0.10.0" } }, "sha512-tfXvynZDT68VoQg80cSdN5TET3ZzLMQCNHQpc3RJCi67YnhRromVhyCwMyi2tCdApGo2rkI46x6e9kCPvNsaBA=="],
 
