@@ -30,15 +30,25 @@ app.get("/api/auth-url", (req, res) => {
 
 // 1. Rota para trocar o Authorization Code pelo Access Token
 app.post("/api/auth/birdid/callback", async (req, res) => {
-  const { code } = req.body;
+  // 1. Recebe também o code_verifier do frontend
+  const { code, code_verifier } = req.body;
 
+  // 2. Valida se ambos foram enviados
   if (!code) {
-    return res.status(400).json({ error: "Código de autorização ausente" });
+    return res.status(400).json({ error: "Código de autorização ausente." });
+  }
+  if (!code_verifier) {
+    return res
+      .status(400)
+      .json({ error: "Parâmetro PKCE (code_verifier) ausente." });
   }
 
   try {
-    // Busca o Token na Soluti
-    const tokenResponse = await SolutiService.getAccessToken(code);
+    // 3. Passa o code E o code_verifier para o seu serviço
+    const tokenResponse = await SolutiService.getAccessToken(
+      code,
+      code_verifier,
+    );
 
     // IMPORTANTE: Se o seu SolutiService retorna o JSON inteiro da Soluti, pegue o access_token.
     // Se ele já retorna a string, use apenas `tokenResponse`.
