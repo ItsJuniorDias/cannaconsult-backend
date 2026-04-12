@@ -57,6 +57,7 @@ class SolutiService {
               hash: hashBase64,
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
               signature_format: "PKCS7", // 🔴 MUDANÇA CRÍTICA AQUI!
+              include_chain: true,
             },
           ],
         },
