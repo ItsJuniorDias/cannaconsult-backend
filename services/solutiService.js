@@ -69,37 +69,50 @@ class SolutiService {
   // Adicione este método dentro da classe SolutiService
   static async getCertificate(accessToken) {
     try {
-      // Bate na rota oficial de certificados
-      const response = await axios.get(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/certificates`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
+      console.log(
+        "[Soluti] Buscando certificado na rota oficial /v0/oauth/certificate-discovery...",
       );
 
-      // Procura em arrays ou strings diretas
-      let certPEM = null;
-      if (response.data.certificates && response.data.certificates.length > 0) {
-        certPEM =
-          response.data.certificates[0].certificate ||
-          response.data.certificates[0];
-      } else if (response.data.certificate) {
-        certPEM = response.data.certificate;
+      // 🔴 ROTA OFICIAL E DOCUMENTADA
+      const response = await axios.get(
+        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/certificate-discovery`,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+        },
+      );
+
+      // Extrai o certificado do array que a API devolve
+      if (
+        response.data &&
+        response.data.certificates &&
+        response.data.certificates.length > 0
+      ) {
+        const certPEM = response.data.certificates[0].certificate;
+
+        if (certPEM && certPEM.includes("BEGIN CERTIFICATE")) {
+          console.log("[Soluti] ✅ Certificado PEM resgatado com sucesso!");
+          return certPEM;
+        }
       }
 
-      if (
-        certPEM &&
-        typeof certPEM === "string" &&
-        certPEM.includes("BEGIN CERTIFICATE")
-      ) {
-        return certPEM;
-      } else {
-        console.log(
-          "[Soluti] ⚠️ Payload bruto retornado:",
-          JSON.stringify(response.data, null, 2),
-        );
-        throw new Error("Não foi possível extrair o PEM do payload.");
-      }
+      // Se chegar aqui, algo veio estranho. Vamos logar.
+      console.log(
+        "[Soluti] ⚠️ Payload bruto retornado:",
+        JSON.stringify(response.data, null, 2),
+      );
+      throw new Error(
+        "A API respondeu, mas não encontrou o texto do certificado.",
+      );
     } catch (error) {
-      throw new Error(`Falha ao buscar certificado: ${error.message}`);
+      console.error(
+        "[Soluti] ❌ Erro ao buscar certificado:",
+        error.response?.data || error.message,
+      );
+      throw new Error(`Falha ao buscar o certificado: ${error.message}`);
     }
   }
 }
