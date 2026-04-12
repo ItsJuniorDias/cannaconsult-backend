@@ -38,79 +38,58 @@ class SolutiService {
     }
   }
 
-  static async signHash(hashBase64, accessToken, otp = null) {
+  // solutiService.js (Trecho atualizado)
+  static async signHash(hashToSign, accessToken) {
     try {
-      console.log(
-        "[Soluti] Enviando Hash para a BirdID (Solicitando PKCS7)...",
-      );
-
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
         {
           hashes: [
             {
               id: "1",
-              alias: "Documento Medico",
-              hash: hashBase64,
+              hash: hashToSign, // O hash dos atributos que o Signer gerou
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
-              signature_format: "PKCS7", // Solicitando o envelope completo
-              include_chain: true, // Incluindo a cadeia de certificados
+              signature_format: "RAW", // Pedimos apenas o carimbo RSA cru
             },
           ],
         },
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+
+      const sig = response.data.signatures[0];
+      return sig.raw_signature || sig.signature;
+    } catch (error) {
+      throw new Error("Erro na BirdID.");
+    }
+  }
+
+  // Adicione este método dentro da classe SolutiService
+  static async getCertificate(accessToken) {
+    try {
+      console.log("[Soluti] Buscando certificado do médico...");
+      const response = await axios.get(
+        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/certificate`,
         {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
-          timeout: 15000,
+          headers: { Authorization: `Bearer ${accessToken}` },
         },
       );
 
       if (
         response.data &&
-        response.data.signatures &&
-        response.data.signatures.length > 0
+        response.data.certificates &&
+        response.data.certificates.length > 0
       ) {
-        const assinatura = response.data.signatures[0];
-        let assinaturaBase64 = null;
-
-        if (typeof assinatura === "string") {
-          assinaturaBase64 = assinatura;
-        } else if (typeof assinatura === "object") {
-          // Caça o formato PKCS7 ou RAW nas propriedades mais comuns
-          assinaturaBase64 =
-            assinatura.pkcs7 ||
-            assinatura.signature ||
-            assinatura.raw_signature ||
-            assinatura.signed_hash;
-        }
-
-        if (!assinaturaBase64) {
-          throw new Error(
-            "Estrutura não reconhecida pela extração: " +
-              JSON.stringify(assinatura),
-          );
-        }
-
-        // 👇 A CORREÇÃO MÁGICA (LIMPEZA DO PEM E QUEBRAS DE LINHA) 👇
-        const cleanBase64 = assinaturaBase64
-          .replace(/-----(BEGIN|END)[^-]+-----/g, "") // Remove -----BEGIN PKCS7-----
-          .replace(/[\r\n\t ]/g, ""); // Remove quebras de linha e espaços invisíveis
-
-        console.log(
-          "[Soluti] ✅ Base64 PKCS7 purificado com sucesso! Repassando para o PDF...",
-        );
-
-        return cleanBase64;
+        console.log("[Soluti] ✅ Certificado resgatado com sucesso!");
+        return response.data.certificates[0]; // Retorna a string PEM
       } else {
-        throw new Error(
-          "A BirdID retornou sucesso, mas o array de assinaturas veio vazio.",
-        );
+        throw new Error("O array de certificados retornou vazio.");
       }
     } catch (error) {
-      console.error("[Soluti] ❌ Erro:", error.response?.data || error.message);
-      throw new Error(`Falha na assinatura.`);
+      console.error(
+        "[Soluti] ❌ Erro ao buscar certificado:",
+        error.response?.data || error.message,
+      );
+      throw new Error("Falha ao buscar o certificado do usuário na BirdID.");
     }
   }
 }

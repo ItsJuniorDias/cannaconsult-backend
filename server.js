@@ -9,6 +9,8 @@ const helmet = require("helmet");
 const SolutiService = require("./services/solutiService");
 const PdfService = require("./services/pdfService");
 
+const CustomSigner = require("./services/signer");
+
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
 
@@ -88,15 +90,13 @@ app.post("/api/sign", async (req, res) => {
     const urlLaudo = laudos.laudoPdfUrl || laudos.documentoPdfUrl;
     const urlReceita = laudos.receitaPdfUrl;
 
-    // Função auxiliar para baixar o arquivo PDF como Buffer
     const downloadPdf = async (url) => {
       if (!url) return null;
-      // IMPORTANTE: responseType 'arraybuffer' é vital para não corromper o PDF
       const response = await axios.get(url, { responseType: "arraybuffer" });
       return Buffer.from(response.data);
     };
 
-    // 2. Faz o download dos documentos disponíveis
+    // 2. Faz o download dos documentos
     const pdfLaudoBuffer = await downloadPdf(urlLaudo);
     const pdfReceitaBuffer = await downloadPdf(urlReceita);
 
@@ -106,54 +106,79 @@ app.post("/api/sign", async (req, res) => {
         .json({ error: "Nenhum documento em PDF encontrado para assinar." });
     }
 
+    // 🔴 NOVO: Busca o certificado do médico para construir o envelope
+    const medicoCertPEM = await SolutiService.getCertificate(token);
+
     let laudoAssinadoBuffer = null;
     let receitaAssinadaBuffer = null;
 
-    // 3. Processo de Assinatura do LAUDO
+    // =================================================================
+    // 3. PROCESSO DE ASSINATURA DO LAUDO
+    // =================================================================
     if (pdfLaudoBuffer) {
-      console.log("⚙️ Gerando hash e assinando Laudo...");
-      // a) Prepara o PDF e extrai o Hash
+      console.log("⚙️ Processando Laudo...");
+
+      // a) Prepara o PDF e extrai o Hash original
       const laudoPreparado = await PdfService.preparePdf(pdfLaudoBuffer);
       const laudoHash =
         await PdfService.calculateHashForSigning(laudoPreparado);
 
-      // b) Envia o Hash para a Soluti/BirdID assinar
-      // A assinatura retornada geralmente é um Base64 (PKCS#7 ou CAdES)
-      const assinaturaLaudo = await SolutiService.signHash(
-        laudoHash,
+      // b) Constrói o Envelope PKCS#7 e gera o Hash dos atributos
+      const { p7: p7Laudo, hashToSignBirdID: hashLaudoParaBirdID } =
+        CustomSigner.prepareEnvelope(laudoHash, medicoCertPEM);
+
+      // c) Manda a BirdID assinar apenas os atributos (Retorna RAW)
+      const assinaturaRawLaudo = await SolutiService.signHash(
+        hashLaudoParaBirdID,
         token,
         otp,
       );
 
-      // c) Injeta a assinatura gráfica/metadados no PDF
+      // d) Finaliza o envelope colando a assinatura RSA dentro dele
+      const signatureHexCompletoLaudo = CustomSigner.finishEnvelope(
+        p7Laudo,
+        assinaturaRawLaudo,
+      );
+
+      // e) Injeta o Hexadecimal gigante do envelope finalizado no PDF
       laudoAssinadoBuffer = await PdfService.injectSignature(
         laudoPreparado,
-        assinaturaLaudo,
+        signatureHexCompletoLaudo,
       );
     }
 
-    // 4. Processo de Assinatura da RECEITA
+    // =================================================================
+    // 4. PROCESSO DE ASSINATURA DA RECEITA
+    // =================================================================
     if (pdfReceitaBuffer) {
-      console.log("⚙️ Gerando hash e assinando Receita...");
+      console.log("⚙️ Processando Receita...");
+
       const receitaPreparada = await PdfService.preparePdf(pdfReceitaBuffer);
       const receitaHash =
         await PdfService.calculateHashForSigning(receitaPreparada);
 
-      const assinaturaReceita = await SolutiService.signHash(
-        receitaHash,
+      const { p7: p7Receita, hashToSignBirdID: hashReceitaParaBirdID } =
+        CustomSigner.prepareEnvelope(receitaHash, medicoCertPEM);
+
+      const assinaturaRawReceita = await SolutiService.signHash(
+        hashReceitaParaBirdID,
         token,
         otp,
       );
 
+      const signatureHexCompletoReceita = CustomSigner.finishEnvelope(
+        p7Receita,
+        assinaturaRawReceita,
+      );
+
       receitaAssinadaBuffer = await PdfService.injectSignature(
         receitaPreparada,
-        assinaturaReceita,
+        signatureHexCompletoReceita,
       );
     }
 
     console.log("🎉 Documentos assinados com sucesso!");
 
-    // Retorna o sucesso para o frontend
     res.status(200).json({
       success: true,
       message: "Documentos assinados com sucesso!",
@@ -169,7 +194,6 @@ app.post("/api/sign", async (req, res) => {
   } catch (error) {
     console.error("❌ Erro no processo de assinatura:", error);
 
-    // Tratamento de erro detalhado caso venha da API da Soluti (ex: OTP inválido)
     if (error.response && error.response.data) {
       return res.status(500).json({
         error:
