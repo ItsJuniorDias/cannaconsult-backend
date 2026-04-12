@@ -1,57 +1,94 @@
-// pdfService.js (Versão Titânio)
+// pdfService.js (Versão Definitiva - Cloud Signing)
 const { PDFDocument } = require("pdf-lib");
 const crypto = require("crypto");
 
-// REGEX RELAXADO: Fundamental para o pdf-lib
+// Regex para encontrar os números do ByteRange
 const BYTE_RANGE_REGEX =
   /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/;
 
 class PdfService {
   static async preparePdf(pdfBuffer) {
-    console.log("[PdfService] 1. Iniciando carregamento do PDF...");
+    console.log("[PdfService] 1. Carregando PDF...");
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
-    // Importação blindada (Trata as diferentes formas que o Node exporta a lib)
     const placeholderPkg = require("@signpdf/placeholder-pdf-lib");
-
     const addPlaceholder =
-      placeholderPkg.pdfLibAddPlaceholder ||
-      placeholderPkg.default?.pdfLibAddPlaceholder ||
-      placeholderPkg.pdflibAddPlaceholder;
+      placeholderPkg.pdflibAddPlaceholder ||
+      placeholderPkg.default?.pdflibAddPlaceholder ||
+      placeholderPkg.pdfLibAddPlaceholder;
 
-    if (typeof addPlaceholder !== "function") {
-      throw new Error(
-        "[CRÍTICO] A função de placeholder não foi encontrada no pacote @signpdf/placeholder-pdf-lib.",
-      );
-    }
-
-    console.log("[PdfService] 2. Injetando Placeholder de Assinatura...");
-
-    // Passamos TODOS os parâmetros de texto para evitar o erro de undefined.length dentro da lib
+    console.log("[PdfService] 2. Injetando Placeholder com asteriscos...");
     addPlaceholder({
       pdfDoc: pdfDoc,
       reason: "Assinatura Medica BirdID",
-      contactInfo: "contato@clinica.com.br", // Evita undefined interno
-      name: "João Marcos Santos da Silva", // Evita undefined interno
-      location: "Brasil", // Evita undefined interno
+      contactInfo: "contato@clinica.com.br",
+      name: "João Marcos Santos da Silva",
+      location: "Brasil",
       signatureLength: 16384,
     });
 
-    console.log("[PdfService] 3. Salvando PDF (Removendo ObjectStreams)...");
+    console.log("[PdfService] 3. Salvando PDF bruto...");
     const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
+    let finalBuffer = Buffer.from(pdfBytes);
 
-    console.log("[PdfService] 4. Preparação concluída com sucesso!");
-    return Buffer.from(pdfBytes);
+    console.log(
+      "[PdfService] 4. Resolvendo o ByteRange Dinâmico (Removendo asteriscos)...",
+    );
+    const pdfString = finalBuffer.toString("binary");
+
+    // 4.1 Encontrar os limites da assinatura (<...>)
+    const contentsStart = pdfString.lastIndexOf("/Contents <");
+    if (contentsStart === -1)
+      throw new Error("Erro: /Contents não encontrado no PDF gerado.");
+
+    const contentsStartOffset = contentsStart + 11;
+    const contentsEndOffset = pdfString.indexOf(">", contentsStartOffset) + 1;
+
+    // Matemática dos bytes (Tamanho antes da assinatura, Início do final, Tamanho do final)
+    const length1 = contentsStartOffset;
+    const start2 = contentsEndOffset;
+    const length2 = finalBuffer.length - start2;
+
+    // 4.2 Localizar o texto original com os asteriscos gerado pelo pdf-lib
+    const byteRangeStart = pdfString.lastIndexOf("/ByteRange");
+    const byteRangeEnd = pdfString.indexOf("]", byteRangeStart) + 1;
+    const originalByteRange = pdfString.substring(byteRangeStart, byteRangeEnd);
+
+    // 4.3 Montar o ByteRange verdadeiro com os números calculados
+    let realByteRange = `/ByteRange [0 ${length1} ${start2} ${length2}]`;
+
+    if (realByteRange.length > originalByteRange.length) {
+      throw new Error(
+        "Tamanho do ByteRange real estourou o limite do placeholder.",
+      );
+    }
+
+    // Preenche com espaços vazios para garantir que não corrompemos os bits do arquivo
+    realByteRange = realByteRange.padEnd(originalByteRange.length, " ");
+
+    // 4.4 Injetar o texto corrigido de volta no Buffer do PDF
+    finalBuffer.write(
+      realByteRange,
+      byteRangeStart,
+      realByteRange.length,
+      "binary",
+    );
+
+    console.log(
+      "[PdfService] 5. PDF Preparado com sucesso! ByteRange Realizado:",
+      realByteRange.trim(),
+    );
+    return finalBuffer;
   }
 
   static calculateHashForSigning(pdfWithPlaceholderBuffer) {
-    console.log("[PdfService] 5. Extraindo ByteRange para o Hash...");
+    console.log("[PdfService] 6. Lendo ByteRange para o Hash...");
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
 
     const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
     if (!byteRangeMatch) {
       throw new Error(
-        "Não foi possível encontrar o ByteRange no PDF. A injeção falhou.",
+        "Falha no Hash: O ByteRange ainda está ilegível ou com asteriscos.",
       );
     }
 
@@ -65,20 +102,13 @@ class PdfService {
       byteRange[2] + byteRange[3],
     );
 
-    console.log("[PdfService] 6. Gerando Hash SHA-256...");
+    console.log("[PdfService] 7. Gerando Hash SHA-256...");
     const documentToHash = Buffer.concat([part1, part2]);
     return crypto.createHash("sha256").update(documentToHash).digest("base64");
   }
 
   static injectSignature(pdfWithPlaceholderBuffer, signatureBase64) {
-    console.log("[PdfService] 7. Iniciando injeção da assinatura real...");
-
-    // Proteção caso a Soluti tenha retornado undefined ou objeto vazio
-    if (!signatureBase64 || typeof signatureBase64 !== "string") {
-      throw new Error(
-        "A assinatura Base64 retornada pela Soluti é inválida ou undefined.",
-      );
-    }
+    console.log("[PdfService] 8. Iniciando injeção da assinatura real...");
 
     const signatureBuffer = Buffer.from(signatureBase64, "base64");
     let signatureHex = signatureBuffer.toString("hex");
@@ -86,16 +116,15 @@ class PdfService {
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
     const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
 
-    if (!byteRangeMatch) {
+    if (!byteRangeMatch)
       throw new Error("ByteRange sumiu na hora de injetar a assinatura.");
-    }
 
     const signatureStart = byteRangeMatch.slice(1).map(Number)[1] + 1;
     const signatureEnd = byteRangeMatch.slice(1).map(Number)[2] - 1;
     const reservedSpaceSize = signatureEnd - signatureStart;
 
     console.log(
-      `[PdfService] 8. Preenchendo espaço reservado (Tamanho: ${reservedSpaceSize})...`,
+      `[PdfService] 9. Preenchendo espaço de ${reservedSpaceSize} caracteres...`,
     );
     signatureHex = signatureHex.padEnd(reservedSpaceSize, "0");
 
@@ -111,7 +140,7 @@ class PdfService {
       pdfWithPlaceholderBuffer.subarray(signatureEnd),
     ]);
 
-    console.log("[PdfService] 9. PDF Finalizado e pronto para entrega!");
+    console.log("🎉 PDF Finalizado e assinado!");
     return finalPdfBuffer;
   }
 }
