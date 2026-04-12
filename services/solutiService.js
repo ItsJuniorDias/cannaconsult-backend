@@ -45,18 +45,16 @@ class SolutiService {
     try {
       console.log("[Soluti] Enviando Hash para a BirdID...");
 
-      // A ROTA CORRETA É: /v0/oauth/signature
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
         {
-          // A BirdID exige um array de hashes e o OID do algoritmo
           hashes: [
             {
               id: "1",
               alias: "Documento Medico",
               hash: hashBase64,
-              hash_algorithm: "2.16.840.1.101.3.4.2.1", // OID obrigatório para SHA-256
-              signature_format: "RAW", // Mantém RAW porque a injeção PKCS#7 é feita por nós no Node
+              hash_algorithm: "2.16.840.1.101.3.4.2.1",
+              signature_format: "RAW",
             },
           ],
         },
@@ -69,23 +67,55 @@ class SolutiService {
         },
       );
 
-      // A BirdID devolve a resposta também em formato de array.
-      // Retornamos apenas a string Base64 da assinatura gerada.
+      // --- TRECHO ATUALIZADO A PARTIR DAQUI ---
       if (
         response.data &&
         response.data.signatures &&
         response.data.signatures.length > 0
       ) {
-        console.log("[Soluti] ✅ Assinatura autorizada com sucesso!");
+        console.log(
+          "[Soluti] ✅ Assinatura autorizada! Analisando o pacote retornado...",
+        );
 
-        // A API da BirdID pode retornar o array de strings direto ou um array de objetos.
-        // Tratamos os dois cenários:
         const assinatura = response.data.signatures[0];
-        return typeof assinatura === "string"
-          ? assinatura
-          : assinatura.signature;
+        let assinaturaBase64 = null;
+
+        if (typeof assinatura === "string") {
+          // Cenário 1: Retornou direto um array de strings
+          assinaturaBase64 = assinatura;
+        } else if (typeof assinatura === "object") {
+          // Cenário 2: Retornou um array de objetos. Vamos caçar o Base64.
+          // A BirdID pode usar 'signature', 'signed_hash', 'pkcs7', etc.
+          assinaturaBase64 =
+            assinatura.signature ||
+            assinatura.signed_hash ||
+            assinatura.pkcs7 ||
+            assinatura.hash;
+
+          // Tratamento extra: Se a BirdID retornar sucesso no HTTP, mas erro no payload
+          if (assinatura.error || assinatura.status === "error") {
+            throw new Error(
+              `A BirdID retornou um erro interno: ${assinatura.error || assinatura.message}`,
+            );
+          }
+        }
+
+        if (!assinaturaBase64) {
+          // Se ainda assim vier vazio, o nosso catch vai mostrar exatamente o que eles mandaram
+          throw new Error(
+            "Estrutura não reconhecida pela extração: " +
+              JSON.stringify(assinatura),
+          );
+        }
+
+        console.log(
+          "[Soluti] ✅ Base64 extraído com sucesso! Repassando para o PDF...",
+        );
+        return assinaturaBase64;
       } else {
-        throw new Error("A BirdID não retornou a assinatura.");
+        throw new Error(
+          "A BirdID retornou sucesso, mas o array de assinaturas veio vazio.",
+        );
       }
     } catch (error) {
       console.error(
@@ -93,12 +123,12 @@ class SolutiService {
         error.response?.status,
       );
       console.error(
-        "[Soluti] ❌ Detalhes da Recusa:",
+        "[Soluti] ❌ Detalhes:",
         JSON.stringify(error.response?.data, null, 2) || error.message,
       );
 
       throw new Error(
-        `A autoridade certificadora recusou a assinatura. Erro: ${error.response?.data?.error_description || "Verifique o token ou os créditos."}`,
+        `Falha na assinatura. Erro: ${error.response?.data?.error_description || error.message}`,
       );
     }
   }
