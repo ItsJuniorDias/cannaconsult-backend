@@ -12,7 +12,7 @@ class SolutiService {
       params.append("redirect_uri", process.env.SOLUTI_REDIRECT_URI);
       params.append("code_verifier", codeVerifier);
 
-      params.append("scope", "signature_session");
+      // REMOVIDO: O scope não deve vir no corpo do POST da troca de token.
 
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/token`,
@@ -26,13 +26,15 @@ class SolutiService {
 
       return response.data.access_token;
     } catch (error) {
-      console.error(
-        "[Soluti] Erro no OAuth:",
-        error.response?.data || error.message,
-      );
-      throw new Error(
-        "Falha de comunicação com o provedor de identidade (Soluti).",
-      );
+      // Pega o erro real da Soluti
+      const detalheErro = error.response?.data
+        ? JSON.stringify(error.response.data)
+        : error.message;
+
+      console.error("[Soluti] Erro no OAuth:", detalheErro);
+
+      // Repassa o erro real para o Frontend para facilitar sua vida
+      throw new Error(`Falha OAuth Soluti: ${detalheErro}`);
     }
   }
 
