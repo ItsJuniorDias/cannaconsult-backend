@@ -87,6 +87,7 @@ class SolutiService {
           // Cenário 2: Retornou um array de objetos. Vamos caçar o Base64.
           // A BirdID pode usar 'signature', 'signed_hash', 'pkcs7', etc.
           assinaturaBase64 =
+            assinatura.raw_signature ||
             assinatura.signature ||
             assinatura.signed_hash ||
             assinatura.pkcs7 ||
