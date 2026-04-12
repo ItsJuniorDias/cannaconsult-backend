@@ -39,7 +39,7 @@ class SolutiService {
   }
 
   // solutiService.js (Trecho atualizado)
-  static async signHash(hashToSign, accessToken) {
+  static async signHash(hashDosAtributos, accessToken) {
     try {
       const response = await axios.post(
         `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
@@ -47,9 +47,9 @@ class SolutiService {
           hashes: [
             {
               id: "1",
-              hash: hashToSign, // O hash dos atributos que o Signer gerou
+              hash: hashDosAtributos,
               hash_algorithm: "2.16.840.1.101.3.4.2.1",
-              signature_format: "RAW", // Pedimos apenas o carimbo RSA cru
+              signature_format: "RAW", // 🔴 CRÍTICO: Agora pedimos RAW!
             },
           ],
         },
@@ -57,53 +57,49 @@ class SolutiService {
       );
 
       const sig = response.data.signatures[0];
-      return sig.raw_signature || sig.signature;
+      const assinaturaRaw = sig.raw_signature || sig.signature;
+
+      // Limpa possíveis lixos do Base64
+      return assinaturaRaw.replace(/[\r\n\t ]/g, "");
     } catch (error) {
-      throw new Error("Erro na BirdID.");
+      throw new Error("Falha na API da BirdID.");
     }
   }
 
   // Adicione este método dentro da classe SolutiService
   static async getCertificate(accessToken) {
     try {
-      console.log("[Soluti] Buscando informações e certificado do usuário...");
-
-      // 🔴 ROTA CORRIGIDA: O padrão OAuth2 para dados do usuário é /userinfo
+      // Bate na rota oficial de certificados
       const response = await axios.get(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/userinfo`,
-        {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        },
+        `${process.env.SOLUTI_OAUTH_URL}/v0/certificates`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
       );
 
-      // Vamos procurar o certificado nas propriedades mais comuns do VaultID
-      const certPEM =
-        response.data.certificate ||
-        response.data.certificate_pem ||
-        response.data.cert ||
-        (response.data.certificates && response.data.certificates[0]);
+      // Procura em arrays ou strings diretas
+      let certPEM = null;
+      if (response.data.certificates && response.data.certificates.length > 0) {
+        certPEM =
+          response.data.certificates[0].certificate ||
+          response.data.certificates[0];
+      } else if (response.data.certificate) {
+        certPEM = response.data.certificate;
+      }
 
-      if (certPEM) {
-        console.log("[Soluti] ✅ Certificado PEM resgatado com sucesso!");
+      if (
+        certPEM &&
+        typeof certPEM === "string" &&
+        certPEM.includes("BEGIN CERTIFICATE")
+      ) {
         return certPEM;
       } else {
-        // Se a Soluti mudou o nome da variável, isso aqui vai nos mostrar exatamente qual é!
         console.log(
-          "[Soluti] ⚠️ Payload do UserInfo:",
+          "[Soluti] ⚠️ Payload bruto retornado:",
           JSON.stringify(response.data, null, 2),
         );
-        throw new Error(
-          "O certificado não foi encontrado nas propriedades mapeadas do userinfo.",
-        );
+        throw new Error("Não foi possível extrair o PEM do payload.");
       }
     } catch (error) {
-      console.error(
-        "[Soluti] ❌ Erro ao buscar certificado:",
-        error.response?.data || error.message,
-      );
-
-      // Se der 404 de novo, vamos tentar a rota alternativa /v0/certificate (sem o oauth)
-      throw new Error("Falha ao buscar o certificado do usuário na BirdID.");
+      throw new Error(`Falha ao buscar certificado: ${error.message}`);
     }
   }
 }
