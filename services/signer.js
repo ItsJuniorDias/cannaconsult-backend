@@ -1,65 +1,70 @@
 // services/signer.js
 const forge = require("node-forge");
 
-// Chave privada de mentira (1024 bits) APENAS para enganar o node-forge e forçá-lo
-// a construir a estrutura ASN.1 do PDF. A assinatura gerada por ela será descartada.
-const DUMMY_KEY_PEM = `-----BEGIN RSA PRIVATE KEY-----
-MIICXAIBAAKBgQC7Z+p1/KzKx0F/t+4... (chave truncada para exemplo, mas o node-forge aceita chaves geradas na hora)
------END RSA PRIVATE KEY-----`;
-
 class CustomSigner {
   static prepareEnvelope(documentBuffer, certificatePem) {
-    // 1. Gera uma chave temporária rápida apenas para a estrutura
+    // 1. Gera uma chave temporária rápida (Demora 10ms)
     const keys = forge.pki.rsa.generateKeyPair(1024);
     const cert = forge.pki.certificateFromPem(certificatePem);
 
-    // 2. Inicia o envelope PKCS#7 / CMS
+    // 2. Inicia o envelope PKCS#7
     const p7 = forge.pkcs7.createSignedData();
-    p7.content = forge.util.createBuffer(documentBuffer.toString("binary"));
 
-    // 3. Adiciona o assinante usando o certificado REAL e a chave FALSA
+    // 🔴 CORREÇÃO 1: Passamos o parâmetro 'binary' explícito.
+    // Isso impede o node-forge de tentar ler o PDF como texto e anula o URIError!
+    p7.content = forge.util.createBuffer(
+      documentBuffer.toString("binary"),
+      "binary",
+    );
+
+    // 3. Adiciona os atributos obrigatórios
     p7.addSigner({
       key: keys.privateKey,
       certificate: cert,
       digestAlgorithm: forge.pki.oids.sha256,
       authenticatedAttributes: [
         { type: forge.pki.oids.contentType, value: forge.pki.oids.data },
-        { type: forge.pki.oids.messageDigest }, // O forge preenche automaticamente
+        { type: forge.pki.oids.messageDigest }, // O node-forge vai preencher isso
         { type: forge.pki.oids.signingTime, value: new Date() },
       ],
     });
 
-    // 4. Manda assinar (Gera a estrutura e os atributos autenticados)
+    // 🔴 CORREÇÃO 2: O Interceptador (Monkey-Patch)
+    let hashToSignHex = null;
+
+    // Guardamos a função original de assinatura do node-forge
+    const originalSign = forge.pki.rsa.sign;
+
+    // Sobrescrevemos a função temporariamente com o nosso "Espião"
+    forge.pki.rsa.sign = function (privateKey, md, scheme) {
+      // ROUBAMOS O HASH! O parâmetro 'md' contém o hash exato e perfeito dos atributos.
+      hashToSignHex = md.digest().toHex();
+
+      // Retornamos uma assinatura falsa cheia de zeros só para ele terminar a estrutura sem dar erro
+      return String.fromCharCode.apply(null, new Uint8Array(128));
+    };
+
+    // 4. Mandamos ele montar a estrutura (isso vai acionar o nosso espião acima)
     p7.sign({ detached: true });
 
-    // 5. Extrai a camada de atributos que realmente precisa ser enviada para a BirdID
-    const signer = p7.signers[0];
-    const authAttrsAsn1 = forge.asn1.create(
-      forge.asn1.Class.UNIVERSAL,
-      forge.asn1.Type.SET,
-      true,
-      signer.authenticatedAttributes,
-    );
+    // 5. Devolvemos a função original para o node-forge para não quebrar o resto do sistema
+    forge.pki.rsa.sign = originalSign;
 
-    // 6. Calcula o Hash SHA-256 desses atributos
-    const authAttrsDer = forge.asn1.toDer(authAttrsAsn1).getBytes();
-    const hashToSign = forge.md.sha256
-      .create()
-      .update(authAttrsDer)
-      .digest()
-      .toHex();
+    if (!hashToSignHex) {
+      throw new Error("Falha ao interceptar o hash dos atributos.");
+    }
 
     return {
       p7,
-      hashToSignBirdID: Buffer.from(hashToSign, "hex").toString("base64"),
+      hashToSignBirdID: Buffer.from(hashToSignHex, "hex").toString("base64"),
     };
   }
 
   static finishEnvelope(p7, rawBirdIdSignatureBase64) {
-    // 7. O Pulo do Gato: Arranca a assinatura falsa e cola a RAW real da Soluti
+    // 6. Arrancamos a assinatura de zeros e colamos a criptografia REAL da Soluti
     p7.signers[0].signature = forge.util.decode64(rawBirdIdSignatureBase64);
 
-    // 8. Transforma o envelope completo e finalizado em Hexadecimal
+    // 7. Transforma o envelope completo e finalizado em Hexadecimal
     const asn1 = forge.pkcs7.toAsn1(p7);
     const der = forge.asn1.toDer(asn1).getBytes();
     return Buffer.from(der, "binary").toString("hex");
