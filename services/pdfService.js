@@ -15,9 +15,9 @@ class PdfService {
     addPlaceholder({
       pdfDoc: pdfDoc,
       page: lastPage,
-      reason: "Assinatura Medica BirdID",
+      reason: "Assinatura Medica",
       contactInfo: "contato@cannaconsult.com.br",
-      name: "Assinatura Digital",
+      name: "Dr(a). Medico Responsavel",
       location: "Brasil",
       signatureLength: 16384,
       widgetRect: [50, 50, 250, 100],
@@ -30,15 +30,16 @@ class PdfService {
     const byteRangeEnd = finalBuffer.indexOf("]", byteRangeStart) + 1;
     const originalByteRangeLength = byteRangeEnd - byteRangeStart;
 
-    // 🔴 A MATEMÁTICA SIMÉTRICA: A fresta agora engloba EXATAMENTE do '<' ao '>'
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = finalBuffer.lastIndexOf(contentsTag);
 
-    const signatureGapStart = contentsPos + 10; // Aponta EXATAMENTE para o '<'
-    const signatureGapEnd = finalBuffer.indexOf(">", signatureGapStart) + 1; // Aponta EXATAMENTE para logo após o '>'
+    // 🔴 A CORREÇÃO DE 1 BYTE: O corte agora é +11.
+    // Ele aponta EXATAMENTE para o primeiro "0", deixando o "<" em segurança.
+    const hexStart = contentsPos + 11;
+    const hexEnd = finalBuffer.indexOf(">", hexStart); // Aponta para o ">"
 
-    const length1 = signatureGapStart;
-    const start2 = signatureGapEnd;
+    const length1 = hexStart;
+    const start2 = hexEnd;
     const length2 = finalBuffer.length - start2;
 
     let realByteRange = `/ByteRange [0 ${length1} ${start2} ${length2}]`;
@@ -53,15 +54,15 @@ class PdfService {
     return finalBuffer;
   }
 
-  // Extrai o buffer do PDF ignorando totalmente a fresta (sem o < e sem o >)
+  // Extrai o buffer do PDF mantendo o < e o > dentro do Hash perfeitamente
   static getDocumentBufferToHash(buffer) {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
-    const signatureGapStart = contentsPos + 10;
-    const signatureGapEnd = buffer.indexOf(">", signatureGapStart) + 1;
+    const hexStart = contentsPos + 11;
+    const hexEnd = buffer.indexOf(">", hexStart);
 
-    const part1 = buffer.subarray(0, signatureGapStart);
-    const part2 = buffer.subarray(signatureGapEnd);
+    const part1 = buffer.subarray(0, hexStart); // Inclui tudo até o "<"
+    const part2 = buffer.subarray(hexEnd); // Inclui tudo a partir do ">"
 
     return Buffer.concat([part1, part2]);
   }
@@ -69,11 +70,11 @@ class PdfService {
   static injectSignature(buffer, signatureHex) {
     const contentsTag = Buffer.from("/Contents <");
     const contentsPos = buffer.lastIndexOf(contentsTag);
-    const signatureGapStart = contentsPos + 10;
-    const signatureGapEnd = buffer.indexOf(">", signatureGapStart) + 1;
+    const hexStart = contentsPos + 11;
+    const hexEnd = buffer.indexOf(">", hexStart);
 
-    // O espaço disponível para os números é o tamanho da fresta menos os símbolos < e >
-    const availableSpace = signatureGapEnd - signatureGapStart - 2;
+    // O espaço para os números é puramente a distância entre os caracteres < e >
+    const availableSpace = hexEnd - hexStart;
 
     if (signatureHex.length > availableSpace) {
       throw new Error(
@@ -83,13 +84,9 @@ class PdfService {
 
     const paddedHex = signatureHex.padEnd(availableSpace, "0");
 
-    // 🔴 O TOQUE DE MESTRE: Reescrevemos o < e o > ao redor do código Hexadecimal
-    buffer.write(
-      `<${paddedHex}>`,
-      signatureGapStart,
-      availableSpace + 2,
-      "ascii",
-    );
+    // 🔴 INJEÇÃO CIRÚRGICA: Nós sobrescrevemos APENAS os zeros.
+    // O < e o > originais do arquivo nunca são tocados ou removidos.
+    buffer.write(paddedHex, hexStart, availableSpace, "ascii");
 
     return buffer;
   }
