@@ -1,4 +1,4 @@
-// pdfService.js
+// pdfService.js (Versão Definitiva - Padrão Adobe Acrobat)
 const { PDFDocument } = require("pdf-lib");
 const crypto = require("crypto");
 
@@ -10,7 +10,6 @@ class PdfService {
     console.log("[PdfService] 1. Carregando PDF...");
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
-    // Pega a última página para colocar o carimbo
     const pages = pdfDoc.getPages();
     const lastPage = pages[pages.length - 1];
 
@@ -24,7 +23,7 @@ class PdfService {
       page: lastPage,
       reason: "Assinatura Medica BirdID",
       contactInfo: "contato@clinica.com.br",
-      name: "João Marcos Santos da Silva",
+      name: "Medico Responsavel",
       location: "Brasil",
       signatureLength: 16384,
       widgetRect: [50, 50, 250, 100],
@@ -34,10 +33,10 @@ class PdfService {
     let finalBuffer = Buffer.from(pdfBytes);
     const pdfString = finalBuffer.toString("binary");
 
-    // 🔴 MATEMÁTICA OFICIAL: O '<' e o '>' agora ficam dentro do Hash!
-    const contentsStart = pdfString.lastIndexOf("/Contents <");
-    const signatureGapStart = contentsStart + 11; // Aponta EXATAMENTE para o primeiro '0' após o '<'
-    const signatureGapEnd = pdfString.indexOf(">", signatureGapStart); // Aponta EXATAMENTE para o '>'
+    // 🔴 MATEMÁTICA PADRÃO ADOBE: O Hash EXCLUI o '<' e o '>'
+    const contentsStart = pdfString.lastIndexOf("/Contents");
+    const signatureGapStart = pdfString.indexOf("<", contentsStart); // Aponta EXATAMENTE para o '<'
+    const signatureGapEnd = pdfString.indexOf(">", signatureGapStart) + 1; // Aponta EXATAMENTE para DEPOIS do '>'
 
     const length1 = signatureGapStart;
     const start2 = signatureGapEnd;
@@ -78,30 +77,31 @@ class PdfService {
   }
 
   static injectSignature(pdfWithPlaceholderBuffer, signatureBase64) {
+    // Transforma o Base64 limpo em Hexadecimal puro
     const signatureBuffer = Buffer.from(signatureBase64, "base64");
     let signatureHex = signatureBuffer.toString("hex");
 
     const pdfString = pdfWithPlaceholderBuffer.toString("binary");
     const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
 
-    // A extração perfeita: Corta exatamente nos limites dos zeros, mantendo '<' e '>' originais
-    const signatureStart = byteRangeMatch.slice(1).map(Number)[1];
-    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2];
+    const signatureStart = byteRangeMatch.slice(1).map(Number)[1]; // Bate exatamente no '<'
+    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2]; // Bate exatamente após o '>'
 
-    const reservedSpaceSize = signatureEnd - signatureStart;
+    const gapSize = signatureEnd - signatureStart;
+    const hexSpace = gapSize - 2; // Desconta o espaço do '<' e do '>'
 
-    signatureHex = signatureHex.padEnd(reservedSpaceSize, "0");
+    signatureHex = signatureHex.padEnd(hexSpace, "0");
 
-    if (signatureHex.length > reservedSpaceSize) {
+    if (signatureHex.length > hexSpace) {
       throw new Error(
         "A assinatura PKCS7 retornada é maior que o espaço reservado.",
       );
     }
 
-    // Injeta a assinatura diretamente no lugar dos zeros
+    // 🔴 INJEÇÃO PADRÃO ADOBE: Recriamos o '<' e o '>' ao redor do Hexadecimal
     return Buffer.concat([
       pdfWithPlaceholderBuffer.subarray(0, signatureStart),
-      Buffer.from(signatureHex, "binary"),
+      Buffer.from(`<${signatureHex}>`, "binary"),
       pdfWithPlaceholderBuffer.subarray(signatureEnd),
     ]);
   }
