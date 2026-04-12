@@ -1,15 +1,13 @@
-// pdfService.js (Versão Definitiva - Padrão Adobe Acrobat)
+// pdfService.js (Versão Definitiva - Pure Buffer)
 const { PDFDocument } = require("pdf-lib");
 const crypto = require("crypto");
-
-const BYTE_RANGE_REGEX =
-  /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/;
 
 class PdfService {
   static async preparePdf(pdfBuffer) {
     console.log("[PdfService] 1. Carregando PDF...");
     const pdfDoc = await PDFDocument.load(pdfBuffer);
 
+    // Pega a última página
     const pages = pdfDoc.getPages();
     const lastPage = pages[pages.length - 1];
 
@@ -31,79 +29,80 @@ class PdfService {
 
     const pdfBytes = await pdfDoc.save({ useObjectStreams: false });
     let finalBuffer = Buffer.from(pdfBytes);
-    const pdfString = finalBuffer.toString("binary");
 
-    // 🔴 MATEMÁTICA PADRÃO ADOBE: O Hash EXCLUI o '<' e o '>'
-    const contentsStart = pdfString.lastIndexOf("/Contents");
-    const signatureGapStart = pdfString.indexOf("<", contentsStart); // Aponta EXATAMENTE para o '<'
-    const signatureGapEnd = pdfString.indexOf(">", signatureGapStart) + 1; // Aponta EXATAMENTE para DEPOIS do '>'
+    // 1. Encontra a posição do placeholder /ByteRange original
+    const byteRangeStart = finalBuffer.lastIndexOf(Buffer.from("/ByteRange"));
+    const byteRangeEnd = finalBuffer.indexOf("]", byteRangeStart) + 1;
+    const originalByteRangeLength = byteRangeEnd - byteRangeStart;
 
-    const length1 = signatureGapStart;
-    const start2 = signatureGapEnd;
+    // 2. Encontra a fresta exata da assinatura (os zeros dentro do < >)
+    const contentsTag = Buffer.from("/Contents <");
+    const contentsPos = finalBuffer.lastIndexOf(contentsTag);
+    if (contentsPos === -1)
+      throw new Error("Não foi possível encontrar a tag /Contents.");
+
+    const signatureStart = contentsPos + contentsTag.length; // Exatamente no primeiro '0' após o '<'
+    const signatureEnd = finalBuffer.indexOf(">", signatureStart); // Exatamente no '>'
+
+    // 3. Calcula o ByteRange matematicamente perfeito
+    const length1 = signatureStart;
+    const start2 = signatureEnd + 1;
     const length2 = finalBuffer.length - start2;
 
-    const byteRangeStart = pdfString.lastIndexOf("/ByteRange");
-    const byteRangeEnd = pdfString.indexOf("]", byteRangeStart) + 1;
-    const originalByteRange = pdfString.substring(byteRangeStart, byteRangeEnd);
-
     let realByteRange = `/ByteRange [0 ${length1} ${start2} ${length2}]`;
-    realByteRange = realByteRange.padEnd(originalByteRange.length, " ");
 
+    // Preenche com espaços vazios para não alterar o tamanho do arquivo
+    realByteRange = realByteRange.padEnd(originalByteRangeLength, " ");
+
+    // 4. Escreve o ByteRange corrigido DIRETAMENTE na memória
     finalBuffer.write(
       realByteRange,
       byteRangeStart,
-      realByteRange.length,
-      "binary",
+      originalByteRangeLength,
+      "ascii",
     );
+
     return finalBuffer;
   }
 
-  static calculateHashForSigning(pdfWithPlaceholderBuffer) {
-    const pdfString = pdfWithPlaceholderBuffer.toString("binary");
-    const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
+  static calculateHashForSigning(buffer) {
+    const contentsTag = Buffer.from("/Contents <");
+    const contentsPos = buffer.lastIndexOf(contentsTag);
+    const signatureStart = contentsPos + contentsTag.length;
+    const signatureEnd = buffer.indexOf(">", signatureStart);
 
-    const byteRange = byteRangeMatch.slice(1).map(Number);
-    const part1 = pdfWithPlaceholderBuffer.subarray(
-      byteRange[0],
-      byteRange[0] + byteRange[1],
-    );
-    const part2 = pdfWithPlaceholderBuffer.subarray(
-      byteRange[2],
-      byteRange[2] + byteRange[3],
-    );
+    // Corta o arquivo cirurgicamente (deixando o recheio de zeros de fora)
+    const part1 = buffer.subarray(0, signatureStart);
+    const part2 = buffer.subarray(signatureEnd + 1);
 
     const documentToHash = Buffer.concat([part1, part2]);
     return crypto.createHash("sha256").update(documentToHash).digest("base64");
   }
 
-  static injectSignature(pdfWithPlaceholderBuffer, signatureBase64) {
-    // Transforma o Base64 limpo em Hexadecimal puro
-    const signatureBuffer = Buffer.from(signatureBase64, "base64");
-    let signatureHex = signatureBuffer.toString("hex");
+  static injectSignature(buffer, signatureBase64) {
+    const signatureHex = Buffer.from(signatureBase64, "base64").toString("hex");
 
-    const pdfString = pdfWithPlaceholderBuffer.toString("binary");
-    const byteRangeMatch = pdfString.match(BYTE_RANGE_REGEX);
+    const contentsTag = Buffer.from("/Contents <");
+    const contentsPos = buffer.lastIndexOf(contentsTag);
+    const signatureStart = contentsPos + contentsTag.length;
+    const signatureEnd = buffer.indexOf(">", signatureStart);
 
-    const signatureStart = byteRangeMatch.slice(1).map(Number)[1]; // Bate exatamente no '<'
-    const signatureEnd = byteRangeMatch.slice(1).map(Number)[2]; // Bate exatamente após o '>'
+    const availableSpace = signatureEnd - signatureStart;
 
-    const gapSize = signatureEnd - signatureStart;
-    const hexSpace = gapSize - 2; // Desconta o espaço do '<' e do '>'
-
-    signatureHex = signatureHex.padEnd(hexSpace, "0");
-
-    if (signatureHex.length > hexSpace) {
+    if (signatureHex.length > availableSpace) {
       throw new Error(
-        "A assinatura PKCS7 retornada é maior que o espaço reservado.",
+        `Assinatura PKCS7 (${signatureHex.length} bytes) estourou o limite de ${availableSpace} bytes.`,
       );
     }
 
-    // 🔴 INJEÇÃO PADRÃO ADOBE: Recriamos o '<' e o '>' ao redor do Hexadecimal
-    return Buffer.concat([
-      pdfWithPlaceholderBuffer.subarray(0, signatureStart),
-      Buffer.from(`<${signatureHex}>`, "binary"),
-      pdfWithPlaceholderBuffer.subarray(signatureEnd),
-    ]);
+    // Preenche com zeros se a assinatura for menor que o buraco
+    const paddedHex = signatureHex.padEnd(availableSpace, "0");
+
+    // 🔴 INJEÇÃO MESTRA: Escreve o hexadecimal direto na memória original do PDF.
+    // Nenhuma string, nenhum concat. O arquivo continua intocado estruturalmente.
+    buffer.write(paddedHex, signatureStart, availableSpace, "ascii");
+
+    return buffer;
   }
 }
 
