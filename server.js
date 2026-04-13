@@ -72,15 +72,14 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
 
 // 2. Rota para Assinar os Documentos (Laudo e Receita)
 app.post("/api/sign", async (req, res) => {
-  const { token, laudos, otp } = req.body;
+  // Adicionei o 'cpf' no body, pois o BirdID Pro autentica via CPF + OTP
+  const { cpf, laudos, otp } = req.body;
 
-  // 🔴 Validação robusta
-  if (!token || typeof token !== "string") {
-    return res.status(400).json({ error: "Token inválido." });
-  }
-
-  if (!otp) {
-    return res.status(400).json({ error: "OTP é obrigatório." });
+  // 🔴 Validação
+  if (!cpf || !otp) {
+    return res
+      .status(400)
+      .json({ error: "CPF e OTP são obrigatórios para BirdID Pro." });
   }
 
   if (!laudos || typeof laudos !== "object") {
@@ -88,120 +87,112 @@ app.post("/api/sign", async (req, res) => {
   }
 
   try {
-    // 📥 Download resiliente
+    // 📥 Download dos arquivos
     const downloadPdf = async (url) => {
       if (!url) return null;
-
-      try {
-        const response = await axios.get(url, {
-          responseType: "arraybuffer",
-          timeout: 20000,
-        });
-
-        if (!response.data) {
-          throw new Error("Resposta vazia ao baixar PDF");
-        }
-
-        return Buffer.from(response.data);
-      } catch (err) {
-        console.error(`❌ Erro ao baixar PDF: ${url}`, err.message);
-        throw new Error(`Falha ao baixar PDF`);
-      }
+      const response = await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: 20000,
+      });
+      return Buffer.from(response.data);
     };
 
     const pdfLaudoBuffer = await downloadPdf(
       laudos.laudoPdfUrl || laudos.documentoPdfUrl,
     );
-
     const pdfReceitaBuffer = await downloadPdf(laudos.receitaPdfUrl);
 
     if (!pdfLaudoBuffer && !pdfReceitaBuffer) {
-      return res.status(400).json({ error: "Nenhum PDF encontrado." });
+      return res
+        .status(400)
+        .json({ error: "Nenhum PDF encontrado para assinatura." });
     }
 
-    let laudoAssinado = null;
-    let receitaAssinada = null;
+    // 🔄 Função auxiliar para esperar a conclusão da assinatura (Polling)
+    const aguardarEBaixar = async (tcn, docId) => {
+      let tentativas = 0;
+      const maxTentativas = 15; // ~30 segundos total (espera de 2s entre tentativas)
+
+      while (tentativas < maxTentativas) {
+        const status = await SolutiService.verificarStatus(tcn, docId);
+
+        if (status.documentoStatus === "SIGNED") {
+          return await SolutiService.baixarDocumentoAssinado(tcn, docId);
+        }
+
+        if (status.documentoStatus === "ERROR") {
+          throw new Error(
+            `Erro na Soluti para o documento ${docId}: ${status.erro}`,
+          );
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Espera 2 segundos
+        tentativas++;
+      }
+      throw new Error(`Timeout aguardando assinatura do documento ${docId}`);
+    };
+
+    const resultados = { laudo: null, receita: null };
 
     // ==========================================
-    // 🧾 LAUDO
+    // 🧾 PROCESSO DE ASSINATURA (CESS)
     // ==========================================
+
+    // Processamos ambos em paralelo para ganhar tempo
+    const processos = [];
+
     if (pdfLaudoBuffer) {
-      try {
-        console.log("⚙️ Processando Laudo...");
-
-        const laudoPrep = await PdfService.preparePdf(pdfLaudoBuffer);
-        const laudoHash = PdfService.calculateHashForSigning(laudoPrep);
-
-        if (!laudoHash) {
-          throw new Error("Falha ao gerar hash do laudo");
-        }
-
-        const assinaturaCMSBase64 = await SolutiService.signHash(
-          laudoHash,
-          token,
-        );
-
-        laudoAssinado = PdfService.injectSignature(
-          Buffer.from(laudoPrep), // 🔴 evita mutação acidental
-          assinaturaCMSBase64,
-        );
-
-        console.log("✅ Laudo assinado com sucesso");
-      } catch (err) {
-        console.error("❌ Erro ao assinar laudo:", err.message);
-        throw new Error(`Erro no laudo: ${err.message}`);
-      }
+      processos.push(
+        (async () => {
+          console.log("⚙️ Iniciando assinatura CESS: Laudo...");
+          const tcn = await SolutiService.iniciarAssinaturaPAdES(
+            cpf,
+            otp,
+            pdfLaudoBuffer.toString("base64"),
+            "laudo_final",
+          );
+          const bufferAssinado = await aguardarEBaixar(tcn, "laudo_final");
+          resultados.laudo = bufferAssinado.toString("base64");
+          console.log("✅ Laudo assinado com sucesso via CESS");
+        })(),
+      );
     }
 
-    // ==========================================
-    // 💊 RECEITA
-    // ==========================================
     if (pdfReceitaBuffer) {
-      try {
-        console.log("⚙️ Processando Receita...");
-
-        const receitaPrep = await PdfService.preparePdf(pdfReceitaBuffer);
-        const receitaHash = PdfService.calculateHashForSigning(receitaPrep);
-
-        if (!receitaHash) {
-          throw new Error("Falha ao gerar hash da receita");
-        }
-
-        const assinaturaCMSBase64 = await SolutiService.signHash(
-          receitaHash,
-          token,
-        );
-
-        receitaAssinada = PdfService.injectSignature(
-          Buffer.from(receitaPrep),
-          assinaturaCMSBase64,
-        );
-
-        console.log("✅ Receita assinada com sucesso");
-      } catch (err) {
-        console.error("❌ Erro ao assinar receita:", err.message);
-        throw new Error(`Erro na receita: ${err.message}`);
-      }
+      processos.push(
+        (async () => {
+          console.log("⚙️ Iniciando assinatura CESS: Receita...");
+          const tcn = await SolutiService.iniciarAssinaturaPAdES(
+            cpf,
+            otp,
+            pdfReceitaBuffer.toString("base64"),
+            "receita_final",
+          );
+          const bufferAssinado = await aguardarEBaixar(tcn, "receita_final");
+          resultados.receita = bufferAssinado.toString("base64");
+          console.log("✅ Receita assinada com sucesso via CESS");
+        })(),
+      );
     }
 
-    console.log("🎉 Documentos assinados com sucesso!");
+    await Promise.all(processos);
+
+    console.log("🎉 Todos os documentos foram processados!");
 
     return res.status(200).json({
       success: true,
       documentos: {
-        laudo: laudoAssinado ? laudoAssinado.toString("base64") : null,
-        receita: receitaAssinada ? receitaAssinada.toString("base64") : null,
+        laudo: resultados.laudo,
+        receita: resultados.receita,
       },
     });
   } catch (error) {
-    console.error("❌ Erro geral:", error.message);
-
+    console.error("❌ Erro Geral no Fluxo BirdID Pro:", error.message);
     return res.status(500).json({
-      error: error.message || "Erro interno ao assinar documentos",
+      error: error.message || "Erro interno ao processar assinatura no CESS",
     });
   }
 });
-
 // ============================================================================
 // FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
 // ============================================================================

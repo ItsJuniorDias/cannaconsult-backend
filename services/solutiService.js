@@ -1,152 +1,131 @@
 const axios = require("axios");
 
 class SolutiService {
-  // 🔐 OAuth Token
-  static async getAccessToken(authCode, codeVerifier) {
+  /**
+   * 🚀 1. Inicia o processo de assinatura PAdES
+   * Substitui todo o fluxo de OAuth Token e Hash CMS.
+   */
+  static async iniciarAssinaturaPAdES(
+    cpf,
+    otp,
+    pdfBase64,
+    docId = "receituario_canna_01",
+  ) {
     try {
-      const params = new URLSearchParams();
-      params.append("grant_type", "authorization_code");
-      params.append("code", authCode);
-      params.append("client_id", process.env.SOLUTI_CLIENT_ID);
-      params.append("client_secret", process.env.SOLUTI_CLIENT_SECRET);
-      params.append("redirect_uri", process.env.SOLUTI_REDIRECT_URI);
-      params.append("code_verifier", codeVerifier);
+      if (!pdfBase64) throw new Error("Base64 do PDF ausente");
 
-      const response = await axios.post(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/token`,
-        params,
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
+      // A API CESS exige a autenticação Basic no formato base64(cpf:otp)
+      const authCredentials = Buffer.from(`${cpf}:${otp}`).toString("base64");
+
+      // Opcional: Se tiver um webhook configurado no seu .env para receber o callback
+      const webhookUrl = process.env.SOLUTI_WEBHOOK_URL || "";
+
+      const payload = {
+        // certificate_alias pode ser vazio ou o próprio CPF dependendo da config do seu cofre
+        certificate_alias: "",
+        type: "PAdES",
+        mode: "async",
+        notification_callback: webhookUrl,
+        documents_source: "DATA_URL",
+        documents: [
+          {
+            id: docId,
+            original_file_name: `${docId}.pdf`,
+            content: `data:application/pdf;base64,${pdfBase64}`,
           },
-          timeout: 15000,
-        },
-      );
-
-      if (!response.data?.access_token) {
-        throw new Error("Access token não retornado pela Soluti");
-      }
-
-      return response.data.access_token;
-    } catch (error) {
-      const detalheErro = error.response?.data
-        ? JSON.stringify(error.response.data)
-        : error.message;
-
-      console.error("[Soluti] ❌ Erro no OAuth:", detalheErro);
-
-      throw new Error(`Falha OAuth Soluti: ${detalheErro}`);
-    }
-  }
-
-  // ✍️ Assinatura do hash (CMS ICP-Brasil)
-  static async signHash(hashBase64, accessToken) {
-    try {
-      if (!hashBase64 || typeof hashBase64 !== "string") {
-        throw new Error("Hash inválido para assinatura");
-      }
+        ],
+      };
 
       const response = await axios.post(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/signature`,
-        {
-          hashes: [
-            {
-              id: "1",
-              hash: hashBase64,
-
-              // SHA-256 OID (correto)
-              hash_algorithm: "2.16.840.1.101.3.4.2.1",
-
-              // 🔴 ESSENCIAL
-              signature_format: "CMS",
-
-              // 🔴 ESSENCIAL (cadeia ICP-Brasil)
-              include_chain: true,
-            },
-          ],
-        },
+        `${process.env.SOLUTI_CESS_URL}/signature-service`,
+        payload,
         {
           headers: {
-            Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: `Basic ${authCredentials}`,
           },
           timeout: 20000,
         },
       );
 
-      if (!response.data?.signatures?.length) {
-        throw new Error("Resposta inválida da API de assinatura");
+      if (!response.data?.tcn) {
+        throw new Error("TCN (Token de Transação) não retornado pela Soluti");
       }
 
-      const sig = response.data.signatures[0];
-
-      let signature =
-        sig.signature || sig.cms || sig.pkcs7 || sig.raw_signature;
-
-      if (!signature) {
-        throw new Error("Nenhuma assinatura retornada pela Soluti");
-      }
-
-      // 🔴 LIMPEZA CRÍTICA
-      signature = signature
-        .replace(/-----(BEGIN|END)[^-]+-----/g, "")
-        .replace(/[\r\n\t ]/g, "");
-
-      if (!signature.match(/^[A-Za-z0-9+/=]+$/)) {
-        throw new Error("Assinatura retornada não é base64 válida");
-      }
-
-      return signature;
+      // Retorna o TCN para você salvar no banco atrelado a essa consulta/prescrição
+      return response.data.tcn;
     } catch (error) {
       const detalheErro = error.response?.data
         ? JSON.stringify(error.response.data)
         : error.message;
 
-      console.error("[Soluti] ❌ Erro ao assinar hash:", detalheErro);
-
-      throw new Error(`Falha na assinatura BirdID: ${detalheErro}`);
+      console.error(
+        "[Soluti CESS] ❌ Erro ao iniciar assinatura:",
+        detalheErro,
+      );
+      throw new Error(`Falha na API BirdID PRO: ${detalheErro}`);
     }
   }
 
-  // 📜 Certificado do usuário (opcional para debug/validação)
-  static async getCertificate(accessToken) {
+  /**
+   * 🔄 2. Verifica o status da transação (Polling ou via Webhook)
+   */
+  static async verificarStatus(tcn, docId = "receituario_canna_01") {
     try {
       const response = await axios.get(
-        `${process.env.SOLUTI_OAUTH_URL}/v0/oauth/certificate-discovery`,
+        `${process.env.SOLUTI_CESS_URL}/signature-service/${tcn}`,
         {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            Accept: "application/json",
-          },
-          timeout: 15000,
+          headers: { Accept: "application/json" },
+          timeout: 10000,
         },
       );
 
-      if (
-        response.data?.certificates &&
-        response.data.certificates.length > 0
-      ) {
-        const certPEM = response.data.certificates[0].certificate;
-
-        if (certPEM && certPEM.includes("BEGIN CERTIFICATE")) {
-          return certPEM;
-        }
-      }
-
-      console.warn(
-        "[Soluti] ⚠️ Certificado não encontrado:",
-        JSON.stringify(response.data, null, 2),
+      const statusGeral = response.data.status; // Pode ser WAITING, PROCESSING, DONE, ERROR
+      const documento = response.data.documents?.find(
+        (doc) => doc.id === docId,
       );
 
-      throw new Error("Certificado não encontrado na resposta");
+      return {
+        transacaoConcluida: statusGeral === "DONE",
+        documentoStatus: documento ? documento.status : "NOT_FOUND",
+        erro: documento?.error_message || null,
+      };
     } catch (error) {
       const detalheErro = error.response?.data
         ? JSON.stringify(error.response.data)
         : error.message;
 
-      console.error("[Soluti] ❌ Erro ao buscar certificado:", detalheErro);
+      console.error("[Soluti CESS] ❌ Erro ao verificar status:", detalheErro);
+      throw new Error(`Falha ao checar status do TCN ${tcn}: ${detalheErro}`);
+    }
+  }
 
-      throw new Error(`Falha ao buscar certificado: ${detalheErro}`);
+  /**
+   * 📥 3. Baixa o PDF já assinado (PAdES)
+   */
+  static async baixarDocumentoAssinado(tcn, docId = "receituario_canna_01") {
+    try {
+      const response = await axios.get(
+        `${process.env.SOLUTI_CESS_URL}/file-transfer/${tcn}/${docId}`,
+        {
+          headers: { Accept: "application/pdf" },
+          responseType: "arraybuffer", // 🔴 CRÍTICO para não corromper o PDF
+          timeout: 20000,
+        },
+      );
+
+      // Retorna o Buffer do PDF assinado para você salvar no S3 / GCP ou enviar pro paciente
+      return Buffer.from(response.data);
+    } catch (error) {
+      const detalheErro = error.response?.data
+        ? Buffer.from(error.response.data).toString("utf8") // Converte o buffer de erro para texto
+        : error.message;
+
+      console.error("[Soluti CESS] ❌ Erro ao baixar documento:", detalheErro);
+      throw new Error(
+        `Falha no download do documento assinado: ${detalheErro}`,
+      );
     }
   }
 }
