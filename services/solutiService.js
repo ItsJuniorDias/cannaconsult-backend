@@ -19,7 +19,7 @@ class SolutiService {
       };
 
       const response = await axios.post(
-        `${process.env.SOLUTI_CESS_URL}/oauth`,
+        `${process.env.SOLUTI_OAUTH_URL}/oauth`,
         payload,
         {
           headers: { "Content-Type": "application/json" },
