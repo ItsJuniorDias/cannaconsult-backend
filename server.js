@@ -13,7 +13,11 @@ const { createCreditCardOrder } = require("./controller/creditCardService");
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+// Aumenta o limite do JSON para 50 megabytes
+app.use(express.json({ limit: "50mb" }));
+
+// É uma boa prática aumentar o urlencoded também, caso esteja usando
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Rota 1: Gerar URL (Apenas para referência, no front você gerou a URL direto no botão)
 app.get("/api/auth-url", (req, res) => {
@@ -70,48 +74,93 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
  * Rota para validação do Passo 1: Geração de Token
  */
 app.post("/api/sign", async (req, res) => {
-  const { cpf, otp } = req.body;
+  const { cpf, otp, pdfBase64, tipoDocumento = "Prescrição Médica" } = req.body;
 
   try {
     console.log("--------------------------------------------------");
-    console.log("[SERVER] Iniciando Validação - Passo 1: Token");
+    console.log("[SERVER] Iniciando Fluxo de Assinatura CESS (PAdES)");
 
-    // Chamamos apenas o método de autenticação
+    // ✅ 1. Validação Básica
+    if (!cpf || !otp || !pdfBase64) {
+      return res.status(400).json({
+        status: "Erro",
+        mensagem: "CPF, OTP e pdfBase64 são obrigatórios.",
+      });
+    }
+
+    // 🔐 2. Solicitar Token (OAuth + VCSchema)
+    console.log("[SERVER] 1. Solicitando Token...");
     const authData = await SolutiService.getAcessToken(cpf, otp);
+    const tokenSchema = authData.authorization_schema;
 
-    console.log("[SERVER] Sucesso! Token gerado e validado.");
+    console.log("[SERVER] -> Token obtido com sucesso.");
 
-    // Retornamos os dados do token para conferência no seu Client (Postman/Frontend)
+    // 📄 3. Preparar documento
+    // Com 'mode: sync', o BirdID Pro costuma assinar nesta etapa se o OTP for válido.
+    console.log("[SERVER] 2. Preparando documento...");
+    const preparacao = await SolutiService.prepararDocumento(
+      pdfBase64,
+      tokenSchema,
+    );
+
+    let finalPdfBase64 = null;
+
+    // 🚀 Lógica de Bifurcação (Sincrona vs Assíncrona)
+    if (preparacao.status === "SIGNED") {
+      // ✅ CENÁRIO A: O documento já saiu assinado (Seu caso atual)
+      console.log(
+        "[SERVER] -> Documento assinado automaticamente (Modo Sincrono).",
+      );
+      console.log("[SERVER] -> Baixando arquivo final...");
+
+      finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
+        preparacao.download_url,
+        tokenSchema,
+      );
+    } else if (preparacao.status === "PENDING" && preparacao.prepared_hash) {
+      // ✍️ CENÁRIO B: Fluxo de hash (Caso a API peça assinatura manual do hash)
+      console.log("[SERVER] 3. Assinando hash manualmente...");
+      const assinatura = await SolutiService.assinarHash(
+        tokenSchema,
+        preparacao.prepared_hash,
+      );
+
+      // Se a assinatura do hash devolver uma URL de resultado
+      if (assinatura?.documents?.[0]?.result) {
+        finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
+          assinatura.documents[0].result,
+          tokenSchema,
+        );
+      }
+    } else {
+      throw new Error(
+        "A API não retornou um estado válido para concluir a assinatura.",
+      );
+    }
+
+    console.log("[SERVER] ✅ Processo concluído com sucesso!");
+
     return res.status(200).json({
       status: "Sucesso",
-      mensagem: "Passo 1 concluído: Autenticação realizada com sucesso.",
-      data: authData,
+      mensagem: "Documento assinado com sucesso.",
+      data: {
+        pdfBase64: finalPdfBase64, // O PDF prontinho para salvar ou exibir
+        tipo: tipoDocumento,
+        timestamp: new Date().toISOString(),
+      },
     });
-
-    /* // ============================================================
-    // RESTANTE DO CÓDIGO COMENTADO PARA VALIDAÇÃO POR ETAPAS
-    // ============================================================
-    
-    /*
-    console.log("[SERVER] Iniciando Passo 2: Preparação do Documento...");
-    const docPreparado = await SolutiService.prepararDocumento(authData.access_token, req.body.pdf);
-    
-    console.log("[SERVER] Iniciando Passo 3: Assinatura...");
-    const resultadoAssinatura = await SolutiService.assinar(authData.access_token, docPreparado.id);
-    
-    res.json({ success: true, assinatura: resultadoAssinatura });
-    */
   } catch (error) {
-    console.error("[SERVER] ❌ Erro no Passo 1:", error.message);
+    const detalhe =
+      error?.response?.data || error.message || "Erro desconhecido";
+    console.error("[SERVER] ❌ Erro no processo:", detalhe);
 
-    res.status(500).json({
+    return res.status(500).json({
       status: "Erro",
-      mensagem: "Falha ao validar token da Soluti",
-      erro: error.message,
+      mensagem: "Falha na integração com Soluti CESS",
+      erro: detalhe,
     });
   }
 });
-
 // ============================================================================
 // FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
 // ============================================================================

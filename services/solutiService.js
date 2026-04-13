@@ -2,97 +2,78 @@ const axios = require("axios");
 
 class SolutiService {
   /**
-   * 🚀 1. Inicia o processo de assinatura PAdES
-   * Substitui todo o fluxo de OAuth Token e Hash CMS.
+   * 🚀 1. Autenticação (gera token + VCSchema)
    */
   static async getAcessToken(cpf, otp) {
     try {
-      console.log(`[DEBUG] Gerando token para CPF: ${cpf} com OTP: ${otp}`);
+      const cpfFormatado = cpf.replace(/\D/g, "").padStart(11, "0");
 
-      if (!cpf || !otp) {
-        throw new Error("CPF e OTP são obrigatórios para gerar o token.");
-      }
-
-      // Certifique-se de que o CPF tenha os 11 dígitos, caso necessário,
-      // pois a documentação exige zeros à esquerda para CPFs menores.
-      const cpfFormatado = cpf.padStart(11, "0");
-
-      // Montando o payload de acordo com a doc da Soluti
       const payload = {
-        client_id: process.env.SOLUTI_CLIENT_ID, // Identificação da aplicação
-        client_secret: process.env.SOLUTI_CLIENT_SECRET, // Senha da aplicação
-        grant_type: "password", // Valor fixo
-        username: cpfFormatado, // CPF do usuário
-        password: otp, // Número OTP gerado,
-        scope: "signature_session", // Escopo para assinatura
-        // provider: process.env.SOLUTI_PROVIDER,        // Opcional/Recomendado: Identificador da nuvem (ex: SOLUTIHOM)
+        client_id: process.env.SOLUTI_CLIENT_ID,
+        client_secret: process.env.SOLUTI_CLIENT_SECRET,
+        grant_type: "password",
+        username: cpfFormatado,
+        password: otp,
+        // Adicionado service_2fa conforme seus logs mostraram ser necessário
+        scope: "signature_session",
       };
 
-      const tokenResponse = await axios.post(
+      const response = await axios.post(
         `${process.env.SOLUTI_CESS_URL}/oauth`,
         payload,
         {
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           timeout: 10000,
         },
       );
 
-      console.log("[DEBUG] Resposta do token da Soluti:", tokenResponse.data);
-
-      if (!tokenResponse.data?.access_token) {
-        throw new Error("Access token não retornado pela Soluti");
+      if (!response.data?.Authorization) {
+        throw new Error("VCSchema não retornado pela Soluti.");
       }
 
-      // Além do access_token, a API também retorna o token 'Authorization'
-      // que você provavelmente precisará usar nas próximas requisições
       return {
-        access_token: tokenResponse.data.access_token,
-        authorization_schema: tokenResponse.data.Authorization, // Ex: "VCSchema U09..."
+        access_token: response.data.access_token,
+        authorization_schema: response.data.Authorization,
       };
     } catch (error) {
-      const detalheErro = error.response?.data
-        ? JSON.stringify(error.response.data)
-        : error.message;
-
-      console.error("[Soluti CESS] ❌ Erro ao gerar token:", detalheErro);
-      throw new Error(`Falha ao gerar token: ${detalheErro}`);
+      console.error(
+        "[Soluti] ❌ Erro no Token:",
+        error.response?.data || error.message,
+      );
+      throw error;
     }
   }
 
-  static async iniciarAssinaturaPAdES(
-    cpf,
-    otp,
-    pdfBase64,
-    docId = "receituario_canna_01",
-  ) {
+  /**
+   * 🧾 2. Preparar/Assinar documento
+   * Ajustado para lidar com o retorno 'SIGNED' direto.
+   */
+  static async prepararDocumento(pdfBase64, authorizationToken) {
     try {
-      console.log(`[DEBUG] Tentando assinar CPF: ${cpf} com OTP: ${otp}`);
-
-      if (!pdfBase64) throw new Error("Base64 do PDF ausente");
-
-      // A API CESS exige a autenticação Basic no formato base64(cpf:otp)
-      const authCredentials = Buffer.from(`${cpf}:${otp}`).toString("base64");
-
-      // Opcional: Se tiver um webhook configurado no seu .env para receber o callback
-      const webhookUrl = process.env.SOLUTI_WEBHOOK_URL || "";
+      // Remove possíveis prefixos data:application/pdf;base64,
+      const pureBase64 = pdfBase64.replace(
+        /^data:application\/pdf;base64,/,
+        "",
+      );
+      const dataUrl = `data:application/pdf;base64,${pureBase64}`;
 
       const payload = {
-        // certificate_alias pode ser vazio ou o próprio CPF dependendo da config do seu cofre
-        certificate_alias: cpf,
-        type: "PAdES",
-        mode: "async",
-        notification_callback: webhookUrl,
-        documents_source: "DATA_URL",
-        documents: [
+        certificate_alias: "",
+        type: "PDFSignature",
+        hash_algorithm: "SHA256",
+        auto_fix_document: true,
+        mode: "sync", // Com sync, ele tenta assinar na hora se o token permitir
+        signature_settings: [
           {
-            id: docId,
-            original_file_name: `${docId}.pdf`,
-            content: `data:application/pdf;base64,${pdfBase64}`,
+            id: "default",
+            reason: "Assinatura Digital de Prescrição Médica",
+            visible_signature: true,
+            visible_sign_page: -1, // Última página
+            extraInfo: [{ name: "2.16.1.12.1.2", value: "Prescrição Médica" }],
           },
         ],
+        documents_source: "DATA_URL",
+        documents: [{ id: "doc1", data: dataUrl }],
       };
 
       const response = await axios.post(
@@ -100,91 +81,59 @@ class SolutiService {
         payload,
         {
           headers: {
+            Authorization: authorizationToken,
             "Content-Type": "application/json",
-            Accept: "application/json",
-            Authorization: `Basic ${authCredentials}`,
           },
-          timeout: 20000,
         },
       );
 
-      if (!response.data?.tcn) {
-        throw new Error("TCN (Token de Transação) não retornado pela Soluti");
+      const doc = response.data?.documents?.[0];
+      if (!doc) throw new Error("Documento não retornado na resposta.");
+
+      console.log(`[SERVER] Status do documento: ${doc.status}`);
+
+      // 🔥 LOGICA NOVA: Se já estiver assinado, retornamos o result (URL do arquivo)
+      if (doc.status === "SIGNED") {
+        return {
+          status: "SIGNED",
+          download_url: doc.result, // URL para baixar o PDF final
+          checksum: doc.checksum,
+        };
       }
 
-      // Retorna o TCN para você salvar no banco atrelado a essa consulta/prescrição
-      return response.data.tcn;
-    } catch (error) {
-      const detalheErro = error.response?.data
-        ? JSON.stringify(error.response.data)
-        : error.message;
+      // Caso contrário, seguimos o fluxo de Hash (se a API retornar)
+      if (doc.prepared_hash) {
+        return {
+          status: "PENDING",
+          prepared_hash: doc.prepared_hash,
+        };
+      }
 
+      throw new Error("API não retornou nem o documento assinado, nem o hash.");
+    } catch (error) {
       console.error(
-        "[Soluti CESS] ❌ Erro ao iniciar assinatura:",
-        detalheErro,
+        "[Soluti] ❌ Erro na Preparação:",
+        error.response?.data || error.message,
       );
-      throw new Error(`Falha na API BirdID PRO: ${detalheErro}`);
+      throw error;
     }
   }
 
   /**
-   * 🔄 2. Verifica o status da transação (Polling ou via Webhook)
+   * 📥 3. Download do PDF Assinado
+   * Necessário porque a Soluti devolve uma URL de 'result'
    */
-  static async verificarStatus(tcn, docId = "receituario_canna_01") {
+  static async baixarDocumentoAssinado(url, authorizationToken) {
     try {
-      const response = await axios.get(
-        `${process.env.SOLUTI_CESS_URL}/signature-service/${tcn}`,
-        {
-          headers: { Accept: "application/json" },
-          timeout: 10000,
-        },
-      );
+      const response = await axios.get(url, {
+        headers: { Authorization: authorizationToken },
+        responseType: "arraybuffer", // Importante para binários/PDF
+      });
 
-      const statusGeral = response.data.status; // Pode ser WAITING, PROCESSING, DONE, ERROR
-      const documento = response.data.documents?.find(
-        (doc) => doc.id === docId,
-      );
-
-      return {
-        transacaoConcluida: statusGeral === "DONE",
-        documentoStatus: documento ? documento.status : "NOT_FOUND",
-        erro: documento?.error_message || null,
-      };
+      return Buffer.from(response.data).toString("base64");
     } catch (error) {
-      const detalheErro = error.response?.data
-        ? JSON.stringify(error.response.data)
-        : error.message;
-
-      console.error("[Soluti CESS] ❌ Erro ao verificar status:", detalheErro);
-      throw new Error(`Falha ao checar status do TCN ${tcn}: ${detalheErro}`);
-    }
-  }
-
-  /**
-   * 📥 3. Baixa o PDF já assinado (PAdES)
-   */
-  static async baixarDocumentoAssinado(tcn, docId = "receituario_canna_01") {
-    try {
-      const response = await axios.get(
-        `${process.env.SOLUTI_CESS_URL}/file-transfer/${tcn}/${docId}`,
-        {
-          headers: { Accept: "application/pdf" },
-          responseType: "arraybuffer", // 🔴 CRÍTICO para não corromper o PDF
-          timeout: 20000,
-        },
-      );
-
-      // Retorna o Buffer do PDF assinado para você salvar no S3 / GCP ou enviar pro paciente
-      return Buffer.from(response.data);
-    } catch (error) {
-      const detalheErro = error.response?.data
-        ? Buffer.from(error.response.data).toString("utf8") // Converte o buffer de erro para texto
-        : error.message;
-
-      console.error("[Soluti CESS] ❌ Erro ao baixar documento:", detalheErro);
-      throw new Error(
-        `Falha no download do documento assinado: ${detalheErro}`,
-      );
+      console.error("[Soluti] ❌ Erro ao baixar PDF:", error.message);
+      throw error;
     }
   }
 }
