@@ -2,18 +2,14 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const crypto = require("crypto");
+
 const axios = require("axios");
 
-const helmet = require("helmet");
-
 const SolutiService = require("./services/solutiService");
-const PdfService = require("./services/pdfService");
 
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
 
-const SIGNATURE_LENGTH = 8192;
 const app = express();
 
 app.use(cors());
