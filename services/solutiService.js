@@ -12,6 +12,8 @@ class SolutiService {
     docId = "receituario_canna_01",
   ) {
     try {
+      console.log(`[DEBUG] Tentando assinar CPF: ${cpf} com OTP: ${otp}`);
+
       if (!pdfBase64) throw new Error("Base64 do PDF ausente");
 
       // A API CESS exige a autenticação Basic no formato base64(cpf:otp)
@@ -22,7 +24,7 @@ class SolutiService {
 
       const payload = {
         // certificate_alias pode ser vazio ou o próprio CPF dependendo da config do seu cofre
-        certificate_alias: "",
+        certificate_alias: cpf,
         type: "PAdES",
         mode: "async",
         notification_callback: webhookUrl,
