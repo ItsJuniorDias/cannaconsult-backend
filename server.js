@@ -66,129 +66,53 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
   }
 });
 
-// 2. Rota para Assinar os Documentos (Laudo e Receita)
+/**
+ * Rota para validação do Passo 1: Geração de Token
+ */
 app.post("/api/sign", async (req, res) => {
-  // Adicionei o 'cpf' no body, pois o BirdID Pro autentica via CPF + OTP
-  const { cpf, laudos, otp } = req.body;
-
-  // 🔴 Validação
-  if (!cpf || !otp) {
-    return res
-      .status(400)
-      .json({ error: "CPF e OTP são obrigatórios para BirdID Pro." });
-  }
-
-  if (!laudos || typeof laudos !== "object") {
-    return res.status(400).json({ error: "Dados de laudos inválidos." });
-  }
+  const { cpf, otp } = req.body;
 
   try {
-    // 📥 Download dos arquivos
-    const downloadPdf = async (url) => {
-      if (!url) return null;
-      const response = await axios.get(url, {
-        responseType: "arraybuffer",
-        timeout: 20000,
-      });
-      return Buffer.from(response.data);
-    };
+    console.log("--------------------------------------------------");
+    console.log("[SERVER] Iniciando Validação - Passo 1: Token");
 
-    const pdfLaudoBuffer = await downloadPdf(
-      laudos.laudoPdfUrl || laudos.documentoPdfUrl,
-    );
-    const pdfReceitaBuffer = await downloadPdf(laudos.receitaPdfUrl);
+    // Chamamos apenas o método de autenticação
+    const authData = await SolutiService.getAcessToken(cpf, otp);
 
-    if (!pdfLaudoBuffer && !pdfReceitaBuffer) {
-      return res
-        .status(400)
-        .json({ error: "Nenhum PDF encontrado para assinatura." });
-    }
+    console.log("[SERVER] Sucesso! Token gerado e validado.");
 
-    // 🔄 Função auxiliar para esperar a conclusão da assinatura (Polling)
-    const aguardarEBaixar = async (tcn, docId) => {
-      let tentativas = 0;
-      const maxTentativas = 15; // ~30 segundos total (espera de 2s entre tentativas)
-
-      while (tentativas < maxTentativas) {
-        const status = await SolutiService.verificarStatus(tcn, docId);
-
-        if (status.documentoStatus === "SIGNED") {
-          return await SolutiService.baixarDocumentoAssinado(tcn, docId);
-        }
-
-        if (status.documentoStatus === "ERROR") {
-          throw new Error(
-            `Erro na Soluti para o documento ${docId}: ${status.erro}`,
-          );
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, 2000)); // Espera 2 segundos
-        tentativas++;
-      }
-      throw new Error(`Timeout aguardando assinatura do documento ${docId}`);
-    };
-
-    const resultados = { laudo: null, receita: null };
-
-    // ==========================================
-    // 🧾 PROCESSO DE ASSINATURA (CESS)
-    // ==========================================
-
-    // Processamos ambos em paralelo para ganhar tempo
-    const processos = [];
-
-    if (pdfLaudoBuffer) {
-      processos.push(
-        (async () => {
-          console.log("⚙️ Iniciando assinatura CESS: Laudo...");
-          const tcn = await SolutiService.iniciarAssinaturaPAdES(
-            cpf,
-            otp,
-            pdfLaudoBuffer.toString("base64"),
-            "laudo_final",
-          );
-          const bufferAssinado = await aguardarEBaixar(tcn, "laudo_final");
-          resultados.laudo = bufferAssinado.toString("base64");
-          console.log("✅ Laudo assinado com sucesso via CESS");
-        })(),
-      );
-    }
-
-    if (pdfReceitaBuffer) {
-      processos.push(
-        (async () => {
-          console.log("⚙️ Iniciando assinatura CESS: Receita...");
-          const tcn = await SolutiService.iniciarAssinaturaPAdES(
-            cpf,
-            otp,
-            pdfReceitaBuffer.toString("base64"),
-            "receita_final",
-          );
-          const bufferAssinado = await aguardarEBaixar(tcn, "receita_final");
-          resultados.receita = bufferAssinado.toString("base64");
-          console.log("✅ Receita assinada com sucesso via CESS");
-        })(),
-      );
-    }
-
-    await Promise.all(processos);
-
-    console.log("🎉 Todos os documentos foram processados!");
-
+    // Retornamos os dados do token para conferência no seu Client (Postman/Frontend)
     return res.status(200).json({
-      success: true,
-      documentos: {
-        laudo: resultados.laudo,
-        receita: resultados.receita,
-      },
+      status: "Sucesso",
+      mensagem: "Passo 1 concluído: Autenticação realizada com sucesso.",
+      data: authData,
     });
+
+    /* // ============================================================
+    // RESTANTE DO CÓDIGO COMENTADO PARA VALIDAÇÃO POR ETAPAS
+    // ============================================================
+    
+    /*
+    console.log("[SERVER] Iniciando Passo 2: Preparação do Documento...");
+    const docPreparado = await SolutiService.prepararDocumento(authData.access_token, req.body.pdf);
+    
+    console.log("[SERVER] Iniciando Passo 3: Assinatura...");
+    const resultadoAssinatura = await SolutiService.assinar(authData.access_token, docPreparado.id);
+    
+    res.json({ success: true, assinatura: resultadoAssinatura });
+    */
   } catch (error) {
-    console.error("❌ Erro Geral no Fluxo BirdID Pro:", error.message);
-    return res.status(500).json({
-      error: error.message || "Erro interno ao processar assinatura no CESS",
+    console.error("[SERVER] ❌ Erro no Passo 1:", error.message);
+
+    res.status(500).json({
+      status: "Erro",
+      mensagem: "Falha ao validar token da Soluti",
+      erro: error.message,
     });
   }
 });
+
+module.exports = router;
 // ============================================================================
 // FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
 // ============================================================================

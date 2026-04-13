@@ -5,6 +5,63 @@ class SolutiService {
    * 🚀 1. Inicia o processo de assinatura PAdES
    * Substitui todo o fluxo de OAuth Token e Hash CMS.
    */
+  static async getAcessToken(cpf, otp) {
+    try {
+      console.log(`[DEBUG] Gerando token para CPF: ${cpf} com OTP: ${otp}`);
+
+      if (!cpf || !otp) {
+        throw new Error("CPF e OTP são obrigatórios para gerar o token.");
+      }
+
+      // Certifique-se de que o CPF tenha os 11 dígitos, caso necessário,
+      // pois a documentação exige zeros à esquerda para CPFs menores.
+      const cpfFormatado = cpf.padStart(11, "0");
+
+      // Montando o payload de acordo com a doc da Soluti
+      const payload = {
+        client_id: process.env.SOLUTI_CLIENT_ID, // Identificação da aplicação
+        client_secret: process.env.SOLUTI_CLIENT_SECRET, // Senha da aplicação
+        grant_type: "password", // Valor fixo
+        username: cpfFormatado, // CPF do usuário
+        password: otp, // Número OTP gerado,
+        scope: "signature_session", // Escopo para assinatura
+        // provider: process.env.SOLUTI_PROVIDER,        // Opcional/Recomendado: Identificador da nuvem (ex: SOLUTIHOM)
+      };
+
+      const tokenResponse = await axios.post(
+        `${process.env.SOLUTI_CESS_URL}/oauth`,
+        payload,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          timeout: 10000,
+        },
+      );
+
+      console.log("[DEBUG] Resposta do token da Soluti:", tokenResponse.data);
+
+      if (!tokenResponse.data?.access_token) {
+        throw new Error("Access token não retornado pela Soluti");
+      }
+
+      // Além do access_token, a API também retorna o token 'Authorization'
+      // que você provavelmente precisará usar nas próximas requisições
+      return {
+        access_token: tokenResponse.data.access_token,
+        authorization_schema: tokenResponse.data.Authorization, // Ex: "VCSchema U09..."
+      };
+    } catch (error) {
+      const detalheErro = error.response?.data
+        ? JSON.stringify(error.response.data)
+        : error.message;
+
+      console.error("[Soluti CESS] ❌ Erro ao gerar token:", detalheErro);
+      throw new Error(`Falha ao gerar token: ${detalheErro}`);
+    }
+  }
+
   static async iniciarAssinaturaPAdES(
     cpf,
     otp,
