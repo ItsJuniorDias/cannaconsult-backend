@@ -27,6 +27,8 @@ class SolutiService {
         },
       );
 
+      console.log("[DEBUG] Resposta RAW da Soluti Nuvem:", response.data);
+
       if (!response.data?.Authorization) {
         throw new Error("VCSchema não retornado pela Soluti.");
       }
