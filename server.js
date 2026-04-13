@@ -74,91 +74,131 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
 app.post("/api/sign", async (req, res) => {
   const { token, laudos, otp } = req.body;
 
-  if (!token || !laudos || !otp) {
-    return res
-      .status(400)
-      .json({ error: "Token, dados e OTP são obrigatórios." });
+  // 🔴 Validação robusta
+  if (!token || typeof token !== "string") {
+    return res.status(400).json({ error: "Token inválido." });
+  }
+
+  if (!otp) {
+    return res.status(400).json({ error: "OTP é obrigatório." });
+  }
+
+  if (!laudos || typeof laudos !== "object") {
+    return res.status(400).json({ error: "Dados de laudos inválidos." });
   }
 
   try {
+    // 📥 Download resiliente
     const downloadPdf = async (url) => {
       if (!url) return null;
-      const response = await axios.get(url, { responseType: "arraybuffer" });
-      return Buffer.from(response.data);
+
+      try {
+        const response = await axios.get(url, {
+          responseType: "arraybuffer",
+          timeout: 20000,
+        });
+
+        if (!response.data) {
+          throw new Error("Resposta vazia ao baixar PDF");
+        }
+
+        return Buffer.from(response.data);
+      } catch (err) {
+        console.error(`❌ Erro ao baixar PDF: ${url}`, err.message);
+        throw new Error(`Falha ao baixar PDF`);
+      }
     };
 
     const pdfLaudoBuffer = await downloadPdf(
       laudos.laudoPdfUrl || laudos.documentoPdfUrl,
     );
+
     const pdfReceitaBuffer = await downloadPdf(laudos.receitaPdfUrl);
 
     if (!pdfLaudoBuffer && !pdfReceitaBuffer) {
       return res.status(400).json({ error: "Nenhum PDF encontrado." });
     }
 
-    // 🔴 REMOVIDO: A busca de certificado e o CustomSigner foram pro lixo!
-    // A API da BirdID agora faz o trabalho pesado de montar o CMS.
-
     let laudoAssinado = null;
     let receitaAssinada = null;
 
     // ==========================================
-    // --- LAUDO ---
+    // 🧾 LAUDO
     // ==========================================
     if (pdfLaudoBuffer) {
-      console.log("⚙️ Processando Laudo...");
+      try {
+        console.log("⚙️ Processando Laudo...");
 
-      // 1. Abre a fresta perfeita no PDF e extrai o Hash original
-      const laudoPrep = await PdfService.preparePdf(pdfLaudoBuffer);
-      const laudoHash = PdfService.calculateHashForSigning(laudoPrep);
+        const laudoPrep = await PdfService.preparePdf(pdfLaudoBuffer);
+        const laudoHash = PdfService.calculateHashForSigning(laudoPrep);
 
-      // 2. Manda o Hash para a Soluti, que devolve o envelope CMS completo (com certificado embutido)
-      const assinaturaCMSBase64 = await SolutiService.signHash(
-        laudoHash,
-        token,
-      );
+        if (!laudoHash) {
+          throw new Error("Falha ao gerar hash do laudo");
+        }
 
-      // 3. Injeta a assinatura cirurgicamente no PDF
-      laudoAssinado = PdfService.injectSignature(
-        laudoPrep,
-        assinaturaCMSBase64,
-      );
+        const assinaturaCMSBase64 = await SolutiService.signHash(
+          laudoHash,
+          token,
+        );
+
+        laudoAssinado = PdfService.injectSignature(
+          Buffer.from(laudoPrep), // 🔴 evita mutação acidental
+          assinaturaCMSBase64,
+        );
+
+        console.log("✅ Laudo assinado com sucesso");
+      } catch (err) {
+        console.error("❌ Erro ao assinar laudo:", err.message);
+        throw new Error(`Erro no laudo: ${err.message}`);
+      }
     }
 
     // ==========================================
-    // --- RECEITA ---
+    // 💊 RECEITA
     // ==========================================
     if (pdfReceitaBuffer) {
-      console.log("⚙️ Processando Receita...");
+      try {
+        console.log("⚙️ Processando Receita...");
 
-      const receitaPrep = await PdfService.preparePdf(pdfReceitaBuffer);
-      const receitaHash = PdfService.calculateHashForSigning(receitaPrep);
+        const receitaPrep = await PdfService.preparePdf(pdfReceitaBuffer);
+        const receitaHash = PdfService.calculateHashForSigning(receitaPrep);
 
-      const assinaturaCMSBase64 = await SolutiService.signHash(
-        receitaHash,
-        token,
-      );
+        if (!receitaHash) {
+          throw new Error("Falha ao gerar hash da receita");
+        }
 
-      receitaAssinada = PdfService.injectSignature(
-        receitaPrep,
-        assinaturaCMSBase64,
-      );
+        const assinaturaCMSBase64 = await SolutiService.signHash(
+          receitaHash,
+          token,
+        );
+
+        receitaAssinada = PdfService.injectSignature(
+          Buffer.from(receitaPrep),
+          assinaturaCMSBase64,
+        );
+
+        console.log("✅ Receita assinada com sucesso");
+      } catch (err) {
+        console.error("❌ Erro ao assinar receita:", err.message);
+        throw new Error(`Erro na receita: ${err.message}`);
+      }
     }
 
-    console.log("🎉 Documentos processados e assinados!");
+    console.log("🎉 Documentos assinados com sucesso!");
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      urls: {
-        laudoBase64: laudoAssinado ? laudoAssinado.toString("base64") : null,
-        receitaBase64: receitaAssinada
-          ? receitaAssinada.toString("base64")
-          : null,
+      documentos: {
+        laudo: laudoAssinado ? laudoAssinado.toString("base64") : null,
+        receita: receitaAssinada ? receitaAssinada.toString("base64") : null,
       },
     });
   } catch (error) {
-    console.error("❌ Erro:", error);
-    res.status(500).json({ error: error.message });
+    console.error("❌ Erro geral:", error.message);
+
+    return res.status(500).json({
+      error: error.message || "Erro interno ao assinar documentos",
+    });
   }
 });
 
