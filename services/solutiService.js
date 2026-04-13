@@ -27,15 +27,31 @@ class SolutiService {
         },
       );
 
-      console.log("[DEBUG] Resposta RAW da Soluti Nuvem:", response.data);
+      const accessToken = response.data?.access_token;
 
-      if (!response.data?.Authorization) {
-        throw new Error("VCSchema não retornado pela Soluti.");
+      if (!accessToken) {
+        throw new Error("Token de acesso não retornado pela Soluti.");
+      }
+
+      let authSchema = response.data?.Authorization;
+
+      if (!authSchema) {
+        // O provedor padrão geralmente é 'SOLUTI'. Se a API mandar outro, usamos ele.
+        const provider = response.data?.provider || "SOLUTI";
+
+        // Concatena o provedor, o separador '-|' e o token
+        const schemaString = `${provider}-|${accessToken}`;
+
+        // Converte para Base64 (Exigência do BirdID Pro)
+        const base64Schema = Buffer.from(schemaString).toString("base64");
+
+        // Monta a string final
+        authSchema = `VCSchema ${base64Schema}`;
       }
 
       return {
-        access_token: response.data.access_token,
-        authorization_schema: response.data.Authorization,
+        access_token: accessToken,
+        authorization_schema: authSchema,
       };
     } catch (error) {
       console.error(
