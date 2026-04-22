@@ -2,13 +2,15 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-
 const axios = require("axios");
 
 const SolutiService = require("./services/solutiService");
-
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
+
+// Importando o SDK do Mercado Pago (para usar no webhook, se necessário)
+const { Payment } = require("mercadopago");
+const mpClient = require("./services/mercadoPagoService");
 
 const app = express();
 
@@ -31,10 +33,8 @@ app.get("/api/auth-url", (req, res) => {
 
 // 1. Rota para trocar o Authorization Code pelo Access Token
 app.post("/api/auth/birdid/callback", async (req, res) => {
-  // 1. Recebe também o code_verifier do frontend
   const { code, code_verifier } = req.body;
 
-  // 2. Valida se ambos foram enviados
   if (!code) {
     return res.status(400).json({ error: "Código de autorização ausente." });
   }
@@ -45,22 +45,17 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
   }
 
   try {
-    // 3. Passa o code E o code_verifier para o seu serviço
     const tokenResponse = await SolutiService.getAccessToken(
       code,
       code_verifier,
     );
 
-    // IMPORTANTE: Se o seu SolutiService retorna o JSON inteiro da Soluti, pegue o access_token.
-    // Se ele já retorna a string, use apenas `tokenResponse`.
     const accessToken =
       typeof tokenResponse === "string"
         ? tokenResponse
         : tokenResponse.access_token;
 
     console.log("Access Token recebido com sucesso!");
-
-    // Devolve para o Frontend salvar no LocalStorage
     res.json({ access_token: accessToken });
   } catch (error) {
     console.error("Erro ao gerar token BirdID:", error);
@@ -80,7 +75,6 @@ app.post("/api/sign", async (req, res) => {
     console.log("--------------------------------------------------");
     console.log("[SERVER] Iniciando Fluxo de Assinatura CESS (PAdES)");
 
-    // ✅ 1. Validação Básica
     if (!cpf || !otp || !pdfBase64) {
       return res.status(400).json({
         status: "Erro",
@@ -88,15 +82,12 @@ app.post("/api/sign", async (req, res) => {
       });
     }
 
-    // 🔐 2. Solicitar Token (OAuth + VCSchema)
     console.log("[SERVER] 1. Solicitando Token...");
     const authData = await SolutiService.getAcessToken(cpf, otp);
     const tokenSchema = authData.authorization_schema;
 
     console.log("[SERVER] -> Token obtido com sucesso.");
 
-    // 📄 3. Preparar documento
-    // Com 'mode: sync', o BirdID Pro costuma assinar nesta etapa se o OTP for válido.
     console.log("[SERVER] 2. Preparando documento...");
     const preparacao = await SolutiService.prepararDocumento(
       pdfBase64,
@@ -105,27 +96,22 @@ app.post("/api/sign", async (req, res) => {
 
     let finalPdfBase64 = null;
 
-    // 🚀 Lógica de Bifurcação (Sincrona vs Assíncrona)
     if (preparacao.status === "SIGNED") {
-      // ✅ CENÁRIO A: O documento já saiu assinado (Seu caso atual)
       console.log(
         "[SERVER] -> Documento assinado automaticamente (Modo Sincrono).",
       );
       console.log("[SERVER] -> Baixando arquivo final...");
-
       finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
         preparacao.download_url,
         tokenSchema,
       );
     } else if (preparacao.status === "PENDING" && preparacao.prepared_hash) {
-      // ✍️ CENÁRIO B: Fluxo de hash (Caso a API peça assinatura manual do hash)
       console.log("[SERVER] 3. Assinando hash manualmente...");
       const assinatura = await SolutiService.assinarHash(
         tokenSchema,
         preparacao.prepared_hash,
       );
 
-      // Se a assinatura do hash devolver uma URL de resultado
       if (assinatura?.documents?.[0]?.result) {
         finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
           assinatura.documents[0].result,
@@ -144,7 +130,7 @@ app.post("/api/sign", async (req, res) => {
       status: "Sucesso",
       mensagem: "Documento assinado com sucesso.",
       data: {
-        pdfBase64: finalPdfBase64, // O PDF prontinho para salvar ou exibir
+        pdfBase64: finalPdfBase64,
         tipo: tipoDocumento,
         timestamp: new Date().toISOString(),
       },
@@ -161,6 +147,7 @@ app.post("/api/sign", async (req, res) => {
     });
   }
 });
+
 // ============================================================================
 // FUNÇÃO AUXILIAR: VALIDAÇÃO DO RECAPTCHA
 // ============================================================================
@@ -233,6 +220,41 @@ app.post("/api/checkout/cartao", async (req, res) => {
   } catch (error) {
     console.error("Erro na rota cartão:", error);
     return res.status(500).json({ success: false, error: "Erro interno." });
+  }
+});
+
+// ============================================================================
+// WEBHOOK MERCADO PAGO (Para ouvir atualizações de status de pagamento)
+// ============================================================================
+app.post("/api/webhook/mercadopago", async (req, res) => {
+  try {
+    const { action, data, type } = req.body;
+
+    // O Mercado Pago envia várias notificações, queremos apenas as de atualização de pagamento
+    if (type === "payment" || action?.startsWith("payment")) {
+      const paymentId = data?.id;
+
+      console.log(
+        `[Webhook MP] Recebida atualização para o pagamento ID: ${paymentId}`,
+      );
+
+      // Instancia o SDK para consultar o status real do pagamento
+      const payment = new Payment(mpClient);
+      const paymentInfo = await payment.get({ id: paymentId });
+
+      console.log(
+        `[Webhook MP] Status do pagamento ${paymentId} mudou para: ${paymentInfo.status}`,
+      );
+
+      // TODO: Aqui você deve atualizar o status do pedido no seu Banco de Dados
+      // Exemplo: if (paymentInfo.status === 'approved') { liberarConsultaOuReceita(paymentId) }
+    }
+
+    // É obrigatório responder ao Mercado Pago com 200 OK rapidamente
+    return res.status(200).send("OK");
+  } catch (error) {
+    console.error("Erro ao processar Webhook do Mercado Pago:", error);
+    return res.status(500).send("Erro interno");
   }
 });
 
