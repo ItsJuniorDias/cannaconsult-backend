@@ -8,7 +8,7 @@ const SolutiService = require("./services/solutiService");
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
 
-// Importando o SDK do Mercado Pago (para usar no webhook, se necessário)
+// Importando o SDK do Mercado Pago
 const { Payment } = require("mercadopago");
 const mpClient = require("./services/mercadoPagoService");
 
@@ -17,7 +17,6 @@ const app = express();
 app.use(cors());
 // Aumenta o limite do JSON para 50 megabytes
 app.use(express.json({ limit: "50mb" }));
-
 // É uma boa prática aumentar o urlencoded também, caso esteja usando
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
@@ -168,7 +167,7 @@ async function verificarCaptcha(token) {
 }
 
 // ============================================================================
-// ENDPOINTS DE CHECKOUT
+// ENDPOINTS DE CHECKOUT E PAGAMENTO
 // ============================================================================
 
 app.post("/api/checkout/pix", async (req, res) => {
@@ -224,13 +223,45 @@ app.post("/api/checkout/cartao", async (req, res) => {
 });
 
 // ============================================================================
-// WEBHOOK MERCADO PAGO (Para ouvir atualizações de status de pagamento)
+// NOVO ENDPOINT: CONSULTAR STATUS DO PAGAMENTO (Usado pelo frontend para o PIX)
+// ============================================================================
+app.get("/api/checkout/status/:orderId", async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    if (!orderId) {
+      return res.status(400).json({ error: "ID do pagamento não fornecido." });
+    }
+
+    // Consulta o Mercado Pago para saber o status atual desse ID
+    const payment = new Payment(mpClient);
+    const paymentInfo = await payment.get({ id: orderId });
+
+    // Mapeamos para o seu frontend, que espera "paid" quando estiver aprovado
+    let mappedStatus = paymentInfo.status;
+    if (paymentInfo.status === "approved") {
+      mappedStatus = "paid";
+    }
+
+    return res.status(200).json({ status: mappedStatus });
+  } catch (error) {
+    console.error(
+      "Erro ao consultar status do pedido:",
+      error.message || error,
+    );
+    return res
+      .status(500)
+      .json({ error: "Não foi possível verificar o status." });
+  }
+});
+
+// ============================================================================
+// WEBHOOK MERCADO PAGO (Para ouvir atualizações em background)
 // ============================================================================
 app.post("/api/webhook/mercadopago", async (req, res) => {
   try {
     const { action, data, type } = req.body;
 
-    // O Mercado Pago envia várias notificações, queremos apenas as de atualização de pagamento
     if (type === "payment" || action?.startsWith("payment")) {
       const paymentId = data?.id;
 
@@ -238,7 +269,6 @@ app.post("/api/webhook/mercadopago", async (req, res) => {
         `[Webhook MP] Recebida atualização para o pagamento ID: ${paymentId}`,
       );
 
-      // Instancia o SDK para consultar o status real do pagamento
       const payment = new Payment(mpClient);
       const paymentInfo = await payment.get({ id: paymentId });
 
@@ -246,11 +276,9 @@ app.post("/api/webhook/mercadopago", async (req, res) => {
         `[Webhook MP] Status do pagamento ${paymentId} mudou para: ${paymentInfo.status}`,
       );
 
-      // TODO: Aqui você deve atualizar o status do pedido no seu Banco de Dados
-      // Exemplo: if (paymentInfo.status === 'approved') { liberarConsultaOuReceita(paymentId) }
+      // TODO: Salvar o status no seu Banco de Dados (Firebase, etc.) se precisar
     }
 
-    // É obrigatório responder ao Mercado Pago com 200 OK rapidamente
     return res.status(200).send("OK");
   } catch (error) {
     console.error("Erro ao processar Webhook do Mercado Pago:", error);
