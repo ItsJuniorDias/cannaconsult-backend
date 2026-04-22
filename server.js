@@ -258,16 +258,31 @@ app.get("/api/checkout/status/:orderId", async (req, res) => {
 // ============================================================================
 // WEBHOOK MERCADO PAGO (Para ouvir atualizações em background)
 // ============================================================================
+// ============================================================================
+// WEBHOOK MERCADO PAGO (Para ouvir atualizações em background)
+// ============================================================================
 app.post("/api/webhook/mercadopago", async (req, res) => {
   try {
-    const { action, data, type } = req.body;
+    // 1. Logamos o payload inteiro para você ver no terminal exatamente o que o MP enviou
+    console.log(
+      "[Webhook MP] Payload body:",
+      JSON.stringify(req.body, null, 2),
+    );
+    console.log("[Webhook MP] Query params:", req.query);
 
-    if (type === "payment" || action?.startsWith("payment")) {
-      const paymentId = data?.id;
+    // 2. Extraímos o ID e o Tipo dependendo se é Webhook normal ou IPN
+    const paymentId =
+      req.body?.data?.id || req.query?.id || req.query?.["data.id"];
+    const type = req.body?.type || req.query?.topic;
 
-      console.log(
-        `[Webhook MP] Recebida atualização para o pagamento ID: ${paymentId}`,
-      );
+    // Se não for uma notificação de pagamento ou não tiver ID, ignoramos e respondemos 200 OK
+    if (!paymentId) {
+      console.log("[Webhook MP] Notificação ignorada (Sem ID de pagamento).");
+      return res.status(200).send("OK");
+    }
+
+    if (type === "payment" || req.body?.action?.startsWith("payment")) {
+      console.log(`[Webhook MP] Consultando pagamento real ID: ${paymentId}`);
 
       const payment = new Payment(mpClient);
       const paymentInfo = await payment.get({ id: paymentId });
@@ -279,10 +294,16 @@ app.post("/api/webhook/mercadopago", async (req, res) => {
       // TODO: Salvar o status no seu Banco de Dados (Firebase, etc.) se precisar
     }
 
+    // Sempre responda 200 OK rapidamente para o Mercado Pago não ficar retentando
     return res.status(200).send("OK");
   } catch (error) {
-    console.error("Erro ao processar Webhook do Mercado Pago:", error);
-    return res.status(500).send("Erro interno");
+    // Se der erro (como o 404), logamos a mensagem de forma mais limpa
+    const errorMessage =
+      error.message || error.response?.data?.message || "Erro desconhecido";
+    console.error(`[Webhook MP] Erro na consulta do ID: ${errorMessage}`);
+
+    // IMPORTANTE: Retornamos 200 mesmo no erro 404 para o Mercado Pago parar de tentar enviar essa notificação falha
+    return res.status(200).send("OK");
   }
 });
 
