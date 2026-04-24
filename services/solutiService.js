@@ -86,7 +86,21 @@ class SolutiService {
             id: "default",
             reason: "Assinatura Digital de Prescrição Médica",
             visible_signature: true,
-            visible_sign_page: -1, // Última página
+            visible_sign_page: -1, // Mantido por compatibilidade com versões antigas do CESS
+
+            // 🔥 LOGICA NOVA: Configuração do carimbo visual padrão
+            visual_representation: {
+              text: "Assinado digitalmente por {{signer_name}}\nData: {{date}}",
+              position: {
+                page: -1, // -1 = Última página
+                x: 50, // Margem esquerda em pontos
+                y: 50, // Margem inferior em pontos
+                width: 300, // Largura do carimbo
+                height: 60, // Altura do carimbo
+                measurement_unit: "pt",
+              },
+            },
+
             extraInfo: [{ name: "2.16.1.12.1.2", value: "Prescrição Médica" }],
           },
         ],
@@ -110,7 +124,7 @@ class SolutiService {
 
       console.log(`[SERVER] Status do documento: ${doc.status}`);
 
-      // 🔥 LOGICA NOVA: Se já estiver assinado, retornamos o result (URL do arquivo)
+      // Se já estiver assinado, retornamos o result (URL do arquivo)
       if (doc.status === "SIGNED") {
         return {
           status: "SIGNED",
