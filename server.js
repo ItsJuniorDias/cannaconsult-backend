@@ -15,12 +15,11 @@ const mpClient = require("./services/mercadoPagoService");
 const app = express();
 
 app.use(cors());
-// Aumenta o limite do JSON para 50 megabytes
+// Aumenta o limite do JSON para 50 megabytes para suportar arquivos PDF em base64
 app.use(express.json({ limit: "50mb" }));
-// É uma boa prática aumentar o urlencoded também, caso esteja usando
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// Rota 1: Gerar URL (Apenas para referência, no front você gerou a URL direto no botão)
+// Rota 1: Gerar URL
 app.get("/api/auth-url", (req, res) => {
   const url = `${process.env.SOLUTI_OAUTH_URL}/authorize?client_id=${process.env.SOLUTI_CLIENT_ID}&redirect_uri=${process.env.SOLUTI_REDIRECT_URI}&response_type=code&scope=signature`;
   res.json({ url });
@@ -64,81 +63,126 @@ app.post("/api/auth/birdid/callback", async (req, res) => {
   }
 });
 
-/**
- * Rota para validação do Passo 1: Geração de Token
- */
-app.post("/api/sign", async (req, res) => {
-  const { cpf, otp, pdfBase64, tipoDocumento = "Prescrição Médica" } = req.body;
+// ============================================================================
+// FUNÇÃO AUXILIAR: ASSINATURA DE DOCUMENTO (CESS / PAdES)
+// ============================================================================
+async function assinarDocumento(cpf, otp, pdfBase64) {
+  console.log("--------------------------------------------------");
+  console.log("[SERVER] Iniciando Fluxo de Assinatura CESS (PAdES)");
+  console.log("[SERVER] 1. Solicitando Token via OTP...");
 
-  try {
-    console.log("--------------------------------------------------");
-    console.log("[SERVER] Iniciando Fluxo de Assinatura CESS (PAdES)");
+  // Verifica as credenciais e obtém o schema de autorização do Bird ID
+  const authData = await SolutiService.getAcessToken(cpf, otp);
+  const tokenSchema = authData.authorization_schema;
 
-    if (!cpf || !otp || !pdfBase64) {
-      return res.status(400).json({
-        status: "Erro",
-        mensagem: "CPF, OTP e pdfBase64 são obrigatórios.",
-      });
-    }
+  console.log("[SERVER] -> Token obtido com sucesso.");
 
-    console.log("[SERVER] 1. Solicitando Token...");
-    const authData = await SolutiService.getAcessToken(cpf, otp);
-    const tokenSchema = authData.authorization_schema;
+  console.log("[SERVER] 2. Preparando documento...");
+  const preparacao = await SolutiService.prepararDocumento(
+    pdfBase64,
+    tokenSchema,
+  );
 
-    console.log("[SERVER] -> Token obtido com sucesso.");
-
-    console.log("[SERVER] 2. Preparando documento...");
-    const preparacao = await SolutiService.prepararDocumento(
-      pdfBase64,
+  if (preparacao.status === "SIGNED") {
+    console.log(
+      "[SERVER] -> Documento assinado automaticamente (Modo Síncrono).",
+    );
+    console.log("[SERVER] -> Baixando arquivo final...");
+    return await SolutiService.baixarDocumentoAssinado(
+      preparacao.download_url,
       tokenSchema,
     );
+  }
 
-    let finalPdfBase64 = null;
+  if (preparacao.status === "PENDING" && preparacao.prepared_hash) {
+    console.log("[SERVER] 3. Assinando hash manualmente...");
+    const assinatura = await SolutiService.assinarHash(
+      tokenSchema,
+      preparacao.prepared_hash,
+    );
 
-    if (preparacao.status === "SIGNED") {
-      console.log(
-        "[SERVER] -> Documento assinado automaticamente (Modo Sincrono).",
-      );
+    if (assinatura?.documents?.[0]?.result) {
       console.log("[SERVER] -> Baixando arquivo final...");
-      finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
-        preparacao.download_url,
+      return await SolutiService.baixarDocumentoAssinado(
+        assinatura.documents[0].result,
         tokenSchema,
-      );
-    } else if (preparacao.status === "PENDING" && preparacao.prepared_hash) {
-      console.log("[SERVER] 3. Assinando hash manualmente...");
-      const assinatura = await SolutiService.assinarHash(
-        tokenSchema,
-        preparacao.prepared_hash,
-      );
-
-      if (assinatura?.documents?.[0]?.result) {
-        finalPdfBase64 = await SolutiService.baixarDocumentoAssinado(
-          assinatura.documents[0].result,
-          tokenSchema,
-        );
-      }
-    } else {
-      throw new Error(
-        "A API não retornou um estado válido para concluir a assinatura.",
       );
     }
+  }
 
-    console.log("[SERVER] ✅ Processo concluído com sucesso!");
+  throw new Error(
+    "A API não retornou um estado válido para concluir a assinatura.",
+  );
+}
 
+// ============================================================================
+// ROTAS DE ASSINATURA SEPARADAS
+// ============================================================================
+
+// Rota 1: Assinatura da Receita (Prescrição)
+app.post("/api/sign/receita", async (req, res) => {
+  const { cpf, otp, pdfBase64 } = req.body;
+
+  if (!cpf || !otp || !pdfBase64) {
+    return res.status(400).json({
+      status: "Erro",
+      mensagem: "CPF, OTP e pdfBase64 são obrigatórios.",
+    });
+  }
+
+  try {
+    const finalPdfBase64 = await assinarDocumento(cpf, otp, pdfBase64);
+
+    console.log("[SERVER] ✅ Receita assinada com sucesso!");
     return res.status(200).json({
       status: "Sucesso",
-      mensagem: "Documento assinado com sucesso.",
+      mensagem: "Receita assinada com sucesso.",
       data: {
         pdfBase64: finalPdfBase64,
-        tipo: tipoDocumento,
+        tipo: "Prescrição Médica",
         timestamp: new Date().toISOString(),
       },
     });
   } catch (error) {
     const detalhe =
       error?.response?.data || error.message || "Erro desconhecido";
-    console.error("[SERVER] ❌ Erro no processo:", detalhe);
+    console.error("[SERVER] ❌ Erro ao assinar receita:", detalhe);
+    return res.status(500).json({
+      status: "Erro",
+      mensagem: "Falha na integração com Soluti CESS",
+      erro: detalhe,
+    });
+  }
+});
 
+// Rota 2: Assinatura do Laudo
+app.post("/api/sign/laudo", async (req, res) => {
+  const { cpf, otp, pdfBase64 } = req.body;
+
+  if (!cpf || !otp || !pdfBase64) {
+    return res.status(400).json({
+      status: "Erro",
+      mensagem: "CPF, OTP e pdfBase64 são obrigatórios.",
+    });
+  }
+
+  try {
+    const finalPdfBase64 = await assinarDocumento(cpf, otp, pdfBase64);
+
+    console.log("[SERVER] ✅ Laudo assinado com sucesso!");
+    return res.status(200).json({
+      status: "Sucesso",
+      mensagem: "Laudo assinado com sucesso.",
+      data: {
+        pdfBase64: finalPdfBase64,
+        tipo: "Laudo Médico",
+        timestamp: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    const detalhe =
+      error?.response?.data || error.message || "Erro desconhecido";
+    console.error("[SERVER] ❌ Erro ao assinar laudo:", detalhe);
     return res.status(500).json({
       status: "Erro",
       mensagem: "Falha na integração com Soluti CESS",
@@ -233,11 +277,9 @@ app.get("/api/checkout/status/:orderId", async (req, res) => {
       return res.status(400).json({ error: "ID do pagamento não fornecido." });
     }
 
-    // Consulta o Mercado Pago para saber o status atual desse ID
     const payment = new Payment(mpClient);
     const paymentInfo = await payment.get({ id: orderId });
 
-    // Mapeamos para o seu frontend, que espera "paid" quando estiver aprovado
     let mappedStatus = paymentInfo.status;
     if (paymentInfo.status === "approved") {
       mappedStatus = "paid";
@@ -258,24 +300,18 @@ app.get("/api/checkout/status/:orderId", async (req, res) => {
 // ============================================================================
 // WEBHOOK MERCADO PAGO (Para ouvir atualizações em background)
 // ============================================================================
-// ============================================================================
-// WEBHOOK MERCADO PAGO (Para ouvir atualizações em background)
-// ============================================================================
 app.post("/api/webhook/mercadopago", async (req, res) => {
   try {
-    // 1. Logamos o payload inteiro para você ver no terminal exatamente o que o MP enviou
     console.log(
       "[Webhook MP] Payload body:",
       JSON.stringify(req.body, null, 2),
     );
     console.log("[Webhook MP] Query params:", req.query);
 
-    // 2. Extraímos o ID e o Tipo dependendo se é Webhook normal ou IPN
     const paymentId =
       req.body?.data?.id || req.query?.id || req.query?.["data.id"];
     const type = req.body?.type || req.query?.topic;
 
-    // Se não for uma notificação de pagamento ou não tiver ID, ignoramos e respondemos 200 OK
     if (!paymentId) {
       console.log("[Webhook MP] Notificação ignorada (Sem ID de pagamento).");
       return res.status(200).send("OK");
@@ -290,19 +326,14 @@ app.post("/api/webhook/mercadopago", async (req, res) => {
       console.log(
         `[Webhook MP] Status do pagamento ${paymentId} mudou para: ${paymentInfo.status}`,
       );
-
-      // TODO: Salvar o status no seu Banco de Dados (Firebase, etc.) se precisar
     }
 
-    // Sempre responda 200 OK rapidamente para o Mercado Pago não ficar retentando
     return res.status(200).send("OK");
   } catch (error) {
-    // Se der erro (como o 404), logamos a mensagem de forma mais limpa
     const errorMessage =
       error.message || error.response?.data?.message || "Erro desconhecido";
     console.error(`[Webhook MP] Erro na consulta do ID: ${errorMessage}`);
 
-    // IMPORTANTE: Retornamos 200 mesmo no erro 404 para o Mercado Pago parar de tentar enviar essa notificação falha
     return res.status(200).send("OK");
   }
 });
