@@ -86,14 +86,15 @@ class SolutiService {
             id: "default",
             reason: "Assinatura Digital de Prescrição Médica",
             visible_signature: true,
-            // 🔥 AJUSTADO: Página fixa e eixo Y mais alto
+
+            // MODO DE DEPURAÇÃO DO CARIMBO
             visual_representation: {
-              text: "Assinado digitalmente por {{signer_name}}\nData: {{date}}",
+              type: "TEXT", // Algumas versões do CESS exigem declarar o tipo
+              text: "ASSINADO DIGITALMENTE - TESTE VISUAL SOLUTI", // Texto fixo sem chaves {{ }}
               position: {
-                //como deixar esse valo dinamico para pegar a ultima pagina do pdf?
-                page: 3, // Passe o número exato da página onde quer o carimbo (neste caso, 3)
-                x: 50, // Margem esquerda
-                y: 100, // Subimos de 50 para 100 para evitar que corte na margem inferior
+                page: 1, // Forçando na primeira página para teste
+                x: 100, // Afastado da margem esquerda
+                y: 400, // Bem no meio da página (considerando A4 que tem ~842pt de altura)
                 width: 300,
                 height: 60,
                 measurement_unit: "pt",
