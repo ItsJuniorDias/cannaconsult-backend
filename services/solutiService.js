@@ -86,17 +86,16 @@ class SolutiService {
             id: "default",
             reason: "Assinatura Digital de Prescrição Médica",
             visible_signature: true,
-            visible_sign_page: -1, // Mantido por compatibilidade com versões antigas do CESS
-
-            // 🔥 LOGICA NOVA: Configuração do carimbo visual padrão
+            // 🔥 AJUSTADO: Página fixa e eixo Y mais alto
             visual_representation: {
               text: "Assinado digitalmente por {{signer_name}}\nData: {{date}}",
               position: {
-                page: -1, // -1 = Última página
-                x: 50, // Margem esquerda em pontos
-                y: 50, // Margem inferior em pontos
-                width: 300, // Largura do carimbo
-                height: 60, // Altura do carimbo
+                //como deixar esse valo dinamico para pegar a ultima pagina do pdf?
+                page: 3, // Passe o número exato da página onde quer o carimbo (neste caso, 3)
+                x: 50, // Margem esquerda
+                y: 100, // Subimos de 50 para 100 para evitar que corte na margem inferior
+                width: 300,
+                height: 60,
                 measurement_unit: "pt",
               },
             },
