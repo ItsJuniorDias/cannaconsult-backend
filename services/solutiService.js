@@ -85,22 +85,31 @@ class SolutiService {
           {
             id: "default",
             reason: "Assinatura Digital de Prescrição Médica",
-            visible_signature: true,
-
-            // MODO DE DEPURAÇÃO DO CARIMBO
+            visible_signature: true, // Isso avisa o Acrobat que a assinatura DEVE ser visível
             visual_representation: {
-              type: "TEXT", // Algumas versões do CESS exigem declarar o tipo
-              text: "ASSINADO DIGITALMENTE - TESTE VISUAL SOLUTI", // Texto fixo sem chaves {{ }}
+              text: {
+                value:
+                  "Assinado digitalmente por {{signer_name}}\nData: {{date}}",
+                include_email: false,
+                include_cpf: false,
+              },
+              image: {
+                // Pixel transparente em Base64 para forçar a renderização do CESS
+                value:
+                  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+                opacity: 100,
+                horizontal_align: "left",
+                vertical_align: "center",
+              },
               position: {
-                page: 1, // Forçando na primeira página para teste
-                x: 100, // Afastado da margem esquerda
-                y: 400, // Bem no meio da página (considerando A4 que tem ~842pt de altura)
+                page: -1,
+                x: 50,
+                y: 100,
                 width: 300,
                 height: 60,
                 measurement_unit: "pt",
               },
             },
-
             extraInfo: [{ name: "2.16.1.12.1.2", value: "Prescrição Médica" }],
           },
         ],
