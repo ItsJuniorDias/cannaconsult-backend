@@ -76,7 +76,7 @@ class SolutiService {
       const dataUrl = `data:application/pdf;base64,${pureBase64}`;
 
       const payload = {
-        certificate_alias: "",
+        certificate_alias: "ALEXANDRE DE PAULA DIAS JUNIOR:44955657885",
         type: "PDFSignature",
         hash_algorithm: "SHA256",
         auto_fix_document: true,
