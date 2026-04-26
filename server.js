@@ -288,34 +288,45 @@ app.post("/api/sign/laudo", async (req, res) => {
 // URL no QR Code: https://cannaconsult-backend.onrender.com/api/validacao/12345?token=ABC
 app.get("/api/validacao/:idDocumento", async (req, res) => {
   const { idDocumento } = req.params;
-  let { token } = req.query;
+  const queryParams = req.query; // Captura todos os parâmetros (token, _format, _secretCode)
 
-  if (token && token.includes("?")) {
+  // Higienização do token (mantendo sua lógica)
+  let token = queryParams.token || queryParams._secretCode;
+  if (token && typeof token === "string" && token.includes("?")) {
     token = token.split("?")[0];
   }
 
   const acceptHeader = req.headers.accept || "";
 
-  // Se for um navegador comum (Paciente escaneando com celular)
+  // 1. Fluxo: Paciente via Navegador (HTML)
   if (acceptHeader.includes("text/html")) {
     console.log(
       `[Redirecionamento] Paciente acessou via navegador. ID: ${idDocumento}`,
     );
-
-    // Substitua pela URL de produção do seu Front onde fica a UI
     const urlDoSeuFront = "https://cannaconsult.com.br/";
 
+    // Redireciona para o front mantendo os parâmetros originais
+    const queryString = new URLSearchParams(queryParams).toString();
     return res.redirect(
-      `${urlDoSeuFront}/validar-receita-medica?id=${idDocumento}&token=${token}`,
+      `${urlDoSeuFront}/validar-receita-medica?${queryString}`,
     );
-  } else {
-    // Se for o robô do ITI / Farmácia
-    console.log(
-      `[Redirecionamento] Sistema ITI acessando arquivo bruto. ID: ${idDocumento}`,
-    );
-
-    return res.redirect(`/api/download/${idDocumento}?token=${token}`);
   }
+
+  // 2. Fluxo: Sistema ITI / Robôs
+  console.log(
+    `[Redirecionamento] Sistema ITI detectado. Encaminhando parâmetros. ID: ${idDocumento}`,
+  );
+
+  // IMPORTANTE: Aqui montamos a URL de destino incluindo TODOS os parâmetros da query original
+  // Isso garante que o _format e o _secretCode cheguem no endpoint de download
+  const searchParams = new URLSearchParams(queryParams);
+
+  // Se você limpou o token, atualiza ele na lista de parâmetros
+  if (token) searchParams.set("token", token);
+
+  return res.redirect(
+    `/api/download/${idDocumento}?${searchParams.toString()}`,
+  );
 });
 
 // ==========================================
