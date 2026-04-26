@@ -354,7 +354,6 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     let validToken = null;
     let tipoDocumento = "";
 
-    // Busca no Firestore
     const receitaQuery = await laudosRef
       .where("receitaId", "==", idDocumento)
       .get();
@@ -382,8 +381,9 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       return res.status(401).send("Não Autorizado");
     }
     console.log(_format, "FORMAT RECEBIDO DO ITI");
+
     // ============================================================
-    // 👇 HANDSHAKE DO VALIDADOR ITI (Detecta o formato com ou sem o '+') 👇
+    // 👇 HANDSHAKE DO VALIDADOR ITI
     // ============================================================
     if (_format && _format.includes("validador-iti") && raw !== "true") {
       console.log(`[ITI] 🤝 Respondendo handshake JSON.`);
@@ -401,33 +401,37 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     }
 
     // ============================================================
-    // 👇 ENTREGA DO ARQUIVO BRUTO (PDF) - PROTEÇÃO BINÁRIA 👇
+    // 👇 ENTREGA DO ARQUIVO BRUTO VIA STREAM
     // ============================================================
     console.log(`[ITI] ✅ Enviando PDF bruto. ID: ${idDocumento}`);
+    const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
 
-    // Forçamos o axios a não interpretar os dados de nenhuma forma
+    // 1. Usa o axios como stream. Isso impede que os dados sejam alocados em memória
+    // como texto ou sofram encoding indesejado.
     const response = await axios({
       method: "get",
       url: pdfUrl,
-      responseType: "arraybuffer",
-      responseEncoding: "binary",
+      responseType: "stream",
     });
 
-    const pdfBuffer = Buffer.from(response.data);
-    const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
-
-    // Headers fundamentais para manter a assinatura intacta
+    // 2. Transfere os cabeçalhos de tamanho e tipo que vieram do Firebase
+    // diretamente para a resposta, se existirem.
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${nomeArquivo}"`);
-    res.setHeader("Content-Length", pdfBuffer.length);
-    res.setHeader("Accept-Ranges", "bytes"); // Importante para o Adobe Reader
-    res.setHeader("Cache-Control", "no-store"); // Evita que proxies alterem o arquivo
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "no-store");
 
-    // .end() com 'binary' é mais seguro que .send() para arquivos assinados
-    return res.status(200).end(pdfBuffer, "binary");
+    if (response.headers["content-length"]) {
+      res.setHeader("Content-Length", response.headers["content-length"]);
+    }
+
+    // 3. Pipe (cano) transfere os bytes diretamente, sem processamento.
+    response.data.pipe(res);
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
-    return res.status(500).send("Erro interno.");
+    return res
+      .status(500)
+      .send("Erro interno ao tentar recuperar ou enviar o arquivo.");
   }
 });
 
