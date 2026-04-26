@@ -392,34 +392,12 @@ app.get("/api/download/:idDocumento", async (req, res) => {
         prescription: {
           signatureFiles: [
             {
-              url: `https://cannaconsult-backend.onrender.com/api/download/${idDocumento}?token=${validToken}&raw=true`,
+              url: pdfUrl,
             },
           ],
         },
       });
     }
-
-    // ============================================================
-    // 👇 ENTREGA DO ARQUIVO BRUTO (BYPASS DIRETO PARA O FIREBASE) 👇
-    // ============================================================
-    console.log(
-      `[ITI] ✅ Redirecionando validador para o Firebase. ID: ${idDocumento}`,
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", "inline; filename=documento.pdf");
-    res.setHeader("Cache-Control", "no-transform");
-    res.setHeader("Content-Encoding", "identity");
-
-    const options = {
-      headers: {
-        "Accept-Encoding": "identity", // 🔥 ESSENCIAL
-      },
-    };
-
-    https.get(pdfUrl, options, (response) => {
-      response.pipe(res);
-    });
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
     return res.status(500).send("Erro interno ao processar requisição.");
