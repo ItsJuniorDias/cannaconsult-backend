@@ -4,9 +4,14 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 
+const crypto = require("crypto");
+const mongoose = require("mongoose");
+
 const SolutiService = require("./services/solutiService");
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
+
+import Documento from "./model/Documento";
 
 // Importando o SDK do Mercado Pago
 const { Payment } = require("mercadopago");
@@ -18,6 +23,13 @@ app.use(cors());
 // Aumenta o limite do JSON para 50 megabytes para suportar arquivos PDF em base64
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("[SERVER] ✅ MongoDB Conectado com sucesso!"))
+  .catch((err) =>
+    console.error("[SERVER] ❌ Erro ao conectar no MongoDB:", err),
+  );
 
 // Rota 1: Gerar URL
 app.get("/api/auth-url", (req, res) => {
@@ -133,13 +145,29 @@ app.post("/api/sign/receita", async (req, res) => {
   try {
     const finalPdfBase64 = await assinarDocumento(cpf, otp, pdfBase64);
 
+    // Gera os identificadores únicos para o validador do ITI
+    const documentId = crypto.randomUUID();
+    const secretCode = crypto.randomBytes(3).toString("hex").toUpperCase();
+
+    // Salva o documento definitivamente no MongoDB
+    await Documento.create({
+      documentId: documentId,
+      secretCode: secretCode,
+      tipo: "Receita Médica",
+      pdfBase64: finalPdfBase64,
+    });
+
     console.log("[SERVER] ✅ Receita assinada com sucesso!");
+
     return res.status(200).json({
       status: "Sucesso",
       mensagem: "Receita assinada com sucesso.",
       data: {
         pdfBase64: finalPdfBase64,
-        tipo: "Prescrição Médica",
+        documentId: documentId,
+        secretCode: secretCode,
+        validationUrl: `https://cannaconsult-backend.onrender.com/api/validacao/${documentId}`,
+        tipo: "Receita Médica",
         timestamp: new Date().toISOString(),
       },
     });
@@ -169,12 +197,28 @@ app.post("/api/sign/laudo", async (req, res) => {
   try {
     const finalPdfBase64 = await assinarDocumento(cpf, otp, pdfBase64);
 
+    // Gera os identificadores únicos para o validador do ITI
+    const documentId = crypto.randomUUID();
+    const secretCode = crypto.randomBytes(3).toString("hex").toUpperCase();
+
+    // Salva o documento definitivamente no MongoDB
+    await Documento.create({
+      documentId: documentId,
+      secretCode: secretCode,
+      tipo: "Laudo Médico",
+      pdfBase64: finalPdfBase64,
+    });
+
     console.log("[SERVER] ✅ Laudo assinado com sucesso!");
+
     return res.status(200).json({
       status: "Sucesso",
       mensagem: "Laudo assinado com sucesso.",
       data: {
         pdfBase64: finalPdfBase64,
+        documentId: documentId,
+        secretCode: secretCode,
+        validationUrl: `https://cannaconsult-backend.onrender.com/api/validacao/${documentId}`,
         tipo: "Laudo Médico",
         timestamp: new Date().toISOString(),
       },
@@ -188,6 +232,80 @@ app.post("/api/sign/laudo", async (req, res) => {
       mensagem: "Falha na integração com Soluti CESS",
       erro: detalhe,
     });
+  }
+});
+
+// ============================================================================
+// ENDPOINTS DO VALIDADOR ITI (QR CODE)
+// ============================================================================
+
+// 1. Rota que o QR Code aponta
+app.get("/api/validacao/:idDocumento", async (req, res) => {
+  try {
+    const { idDocumento } = req.params;
+    const { _format, _secretCode } = req.query;
+
+    if (_format === "application/validador-iti+json") {
+      // Busca no MongoDB
+      const doc = await Documento.findOne({ documentId: idDocumento });
+
+      if (!doc || doc.secretCode !== _secretCode) {
+        console.log(
+          `[ITI] ❌ Tentativa falha de validação. ID: ${idDocumento}`,
+        );
+        return res.status(401).json({
+          erro: "Código de acesso inválido ou documento inexistente.",
+        });
+      }
+
+      console.log(`[ITI] 🟢 Validação autorizada. ID: ${idDocumento}`);
+
+      const baseUrl = process.env.API_BASE_URL || `http://${req.headers.host}`;
+      return res.status(200).json({
+        documentUrl: `${baseUrl}/api/download/${idDocumento}?token=${doc.secretCode}`,
+      });
+    }
+
+    return res.redirect("https://cannaconsult.com.br/como-validar-receita");
+  } catch (error) {
+    console.error("[ITI] Erro na rota de validação:", error);
+    return res
+      .status(500)
+      .json({ erro: "Erro interno no servidor de validação." });
+  }
+});
+
+// 2. Rota de Download Direto
+app.get("/api/download/:idDocumento", async (req, res) => {
+  try {
+    const { idDocumento } = req.params;
+    const { token } = req.query;
+
+    // Busca no MongoDB
+    const doc = await Documento.findOne({ documentId: idDocumento });
+
+    if (!doc || doc.secretCode !== token) {
+      return res.status(403).send("Acesso Negado");
+    }
+
+    const pdfBuffer = Buffer.from(doc.pdfBase64, "base64");
+
+    const nomeArquivo = doc.tipo.toLowerCase().replace(" ", "_");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${nomeArquivo}_${idDocumento}.pdf"`,
+    );
+    res.setHeader("Content-Length", pdfBuffer.length);
+
+    console.log(
+      `[ITI] 📥 Enviando arquivo PDF para o validador. ID: ${idDocumento}`,
+    );
+    return res.send(pdfBuffer);
+  } catch (error) {
+    console.error("[ITI] Erro no download do documento:", error);
+    return res.status(500).send("Erro ao processar o arquivo.");
   }
 });
 
