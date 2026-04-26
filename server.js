@@ -240,38 +240,40 @@ app.post("/api/sign/laudo", async (req, res) => {
 // ============================================================================
 
 // 1. Rota que o QR Code aponta
+// Rota "Guarda de Trânsito" (A URL que está no QR Code)
 app.get("/api/validacao/:idDocumento", async (req, res) => {
-  try {
-    const { idDocumento } = req.params;
-    const { _format, _secretCode } = req.query;
+  const { idDocumento } = req.params;
+  const { token } = req.query;
 
-    if (_format === "application/validador-iti+json") {
-      // Busca no MongoDB
-      const doc = await Documento.findOne({ documentId: idDocumento });
+  // Verifica o cabeçalho 'Accept'. Navegadores (Safari, Chrome) sempre pedem 'text/html'.
+  // O validador do ITI / Farmácias pedem '*/*' ou 'application/pdf'.
+  const acceptHeader = req.headers.accept || "";
 
-      if (!doc || doc.secretCode !== _secretCode) {
-        console.log(
-          `[ITI] ❌ Tentativa falha de validação. ID: ${idDocumento}`,
-        );
-        return res.status(401).json({
-          erro: "Código de acesso inválido ou documento inexistente.",
-        });
-      }
+  if (acceptHeader.includes("text/html")) {
+    // ==========================================
+    // FLUXO 1: PACIENTE COM A CÂMERA NATIVA
+    // ==========================================
+    console.log(
+      `[Redirecionamento] Paciente acessou via navegador. ID: ${idDocumento}`,
+    );
 
-      console.log(`[ITI] 🟢 Validação autorizada. ID: ${idDocumento}`);
+    // Substitua pela URL real de produção do seu frontend!
+    const urlDoSeuFront = "https://cannaconsult.com.br";
 
-      const baseUrl = process.env.API_BASE_URL || `http://${req.headers.host}`;
-      return res.status(200).json({
-        documentUrl: `${baseUrl}/api/download/${idDocumento}?token=${doc.secretCode}`,
-      });
-    }
+    // Manda o paciente para a sua tela visual de fallback
+    return res.redirect(
+      `${urlDoSeuFront}/validar-receita-medica?id=${idDocumento}&token=${token}`,
+    );
+  } else {
+    // ==========================================
+    // FLUXO 2: VALIDADOR DO ITI OU FARMÁCIA
+    // ==========================================
+    console.log(
+      `[Redirecionamento] Sistema ITI acessando arquivo bruto. ID: ${idDocumento}`,
+    );
 
-    return res.redirect("https://cannaconsult.com.br/como-validar-receita");
-  } catch (error) {
-    console.error("[ITI] Erro na rota de validação:", error);
-    return res
-      .status(500)
-      .json({ erro: "Erro interno no servidor de validação." });
+    // Como é o ITI, redireciona internamente para a sua rota de download que já está pronta!
+    return res.redirect(`/api/download/${idDocumento}?token=${token}`);
   }
 });
 
