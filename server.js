@@ -324,26 +324,28 @@ app.get("/api/validacao/:idDocumento", async (req, res) => {
 app.get("/api/download/:idDocumento", async (req, res) => {
   try {
     const { idDocumento } = req.params;
+    const { _format, _secretCode } = req.query; // Captura os parâmetros do ITI
     let { token } = req.query;
 
-    // 👇 HIGIENIZAÇÃO DO TOKEN (Limpa a bagunça do ITI) 👇
-    if (token && token.includes("?")) {
-      token = token.split("?")[0];
-      // Se vier "TR04AN?_secretCode=TR04AN", ele corta na interrogação e guarda só "TR04AN"
+    // 1. Prioriza o _secretCode do ITI como token, se disponível
+    const finalToken = _secretCode || token;
+
+    // Higienização para casos de URLs mal formadas
+    let cleanToken = finalToken;
+    if (cleanToken && cleanToken.includes("?")) {
+      cleanToken = cleanToken.split("?")[0];
     }
 
     const laudosRef = db.collection("laudos");
-
     let docData = null;
     let pdfUrl = null;
     let validToken = null;
     let tipoDocumento = "";
 
-    // Como Laudos e Receitas ficam na mesma collection, busca pelos dois IDs
+    // Busca no Firestore (Lógica mantida)
     const receitaQuery = await laudosRef
       .where("receitaId", "==", idDocumento)
       .get();
-
     if (!receitaQuery.empty) {
       docData = receitaQuery.docs[0].data();
       pdfUrl = docData.receitaPdfUrl;
@@ -361,39 +363,50 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       }
     }
 
-    // Validações
-    if (!docData) {
-      console.log(
-        `[ITI] ❌ Documento não encontrado no Firestore. ID: ${idDocumento}`,
-      );
-      return res.status(404).send("Documento não encontrado");
+    // Validações Básicas
+    if (!docData) return res.status(404).send("Documento não encontrado");
+
+    if (validToken !== cleanToken) {
+      console.log(`[ITI] ❌ Token inválido: ${cleanToken}`);
+      return res.status(401).send("Não Autorizado");
     }
 
-    if (validToken !== token) {
-      console.log(
-        `[ITI] ❌ Token inválido para o ID: ${idDocumento}. Esperado: ${validToken}, Recebido: ${token}`,
-      );
-      return res.status(403).send("Acesso Negado");
+    // ============================================================
+    // 👇 NOVA REGRA: HANDSHAKE DO VALIDADOR ITI 👇
+    // ============================================================
+    if (_format === "application/validador-iti+json") {
+      console.log(`[ITI] 🤝 Respondendo handshake JSON para o Validador.`);
+
+      return res.json({
+        version: "1.0.0",
+        prescription: {
+          signatureFiles: [
+            {
+              // Esta é a URL que o ITI vai chamar em seguida para pegar o PDF de fato
+              url: `https://cannaconsult-backend.onrender.com/api/download/${idDocumento}?token=${validToken}&raw=true`,
+            },
+          ],
+        },
+      });
     }
 
-    console.log(`[ITI] ✅ Credenciais validadas. Baixando PDF do Storage...`);
+    // ============================================================
+    // 👇 ENTREGA DO ARQUIVO BRUTO (PDF) 👇
+    // ============================================================
+    console.log(`[ITI] ✅ Enviando PDF bruto para o sistema.`);
 
-    // Busca o PDF binário da URL pública do Firebase Storage
     const response = await axios.get(pdfUrl, { responseType: "arraybuffer" });
     const pdfBuffer = Buffer.from(response.data);
-
     const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
 
-    // Devolve o Buffer para o sistema do governo
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${nomeArquivo}"`);
     res.setHeader("Content-Length", pdfBuffer.length);
 
-    console.log(`[ITI] 📥 Enviando arquivo com sucesso. ID: ${idDocumento}`);
     return res.send(pdfBuffer);
   } catch (error) {
-    console.error("[ITI] Erro no download do documento:", error);
-    return res.status(500).send("Erro interno ao processar o arquivo.");
+    console.error("[ITI] Erro no processamento:", error);
+    return res.status(500).send("Erro interno.");
   }
 });
 
