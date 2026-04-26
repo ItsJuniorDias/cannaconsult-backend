@@ -8,6 +8,8 @@ const fs = require("fs");
 
 const admin = require("firebase-admin");
 
+const https = require("https");
+
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
@@ -404,10 +406,13 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       `[ITI] ✅ Redirecionando validador para o Firebase. ID: ${idDocumento}`,
     );
 
-    // O status 302 (Found) faz o Postman ou o robô do ITI irem buscar o
-    // arquivo diretamente nos servidores do Google, garantindo 100% de
-    // integridade dos bytes da assinatura.
-    return res.redirect(302, pdfUrl);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Cache-Control", "no-transform");
+
+    https.get(pdfUrl, (response) => {
+      response.pipe(res);
+    });
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
     return res.status(500).send("Erro interno ao processar requisição.");
