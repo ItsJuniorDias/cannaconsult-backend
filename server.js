@@ -352,8 +352,8 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     let docData = null;
     let pdfUrl = null;
     let validToken = null;
-    let tipoDocumento = "";
 
+    // Busca no Firestore
     const receitaQuery = await laudosRef
       .where("receitaId", "==", idDocumento)
       .get();
@@ -361,7 +361,6 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       docData = receitaQuery.docs[0].data();
       pdfUrl = docData.receitaPdfUrl;
       validToken = docData.receitaSecret;
-      tipoDocumento = "receita";
     } else {
       const laudoQuery = await laudosRef
         .where("laudoId", "==", idDocumento)
@@ -370,7 +369,6 @@ app.get("/api/download/:idDocumento", async (req, res) => {
         docData = laudoQuery.docs[0].data();
         pdfUrl = docData.laudoPdfUrl;
         validToken = docData.laudoSecret;
-        tipoDocumento = "laudo";
       }
     }
 
@@ -380,7 +378,6 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       console.log(`[ITI] ❌ Token inválido: ${cleanToken}`);
       return res.status(401).send("Não Autorizado");
     }
-    console.log(_format, "FORMAT RECEBIDO DO ITI");
 
     // ============================================================
     // 👇 HANDSHAKE DO VALIDADOR ITI
@@ -401,37 +398,19 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     }
 
     // ============================================================
-    // 👇 ENTREGA DO ARQUIVO BRUTO VIA STREAM
+    // 👇 ENTREGA DO ARQUIVO BRUTO (BYPASS DIRETO PARA O FIREBASE) 👇
     // ============================================================
-    console.log(`[ITI] ✅ Enviando PDF bruto. ID: ${idDocumento}`);
-    const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
+    console.log(
+      `[ITI] ✅ Redirecionando validador para o Firebase. ID: ${idDocumento}`,
+    );
 
-    // 1. Usa o axios como stream. Isso impede que os dados sejam alocados em memória
-    // como texto ou sofram encoding indesejado.
-    const response = await axios({
-      method: "get",
-      url: pdfUrl,
-      responseType: "stream",
-    });
-
-    // 2. Transfere os cabeçalhos de tamanho e tipo que vieram do Firebase
-    // diretamente para a resposta, se existirem.
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="${nomeArquivo}"`);
-    res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Cache-Control", "no-store");
-
-    if (response.headers["content-length"]) {
-      res.setHeader("Content-Length", response.headers["content-length"]);
-    }
-
-    // 3. Pipe (cano) transfere os bytes diretamente, sem processamento.
-    response.data.pipe(res);
+    // O status 302 (Found) faz o Postman ou o robô do ITI irem buscar o
+    // arquivo diretamente nos servidores do Google, garantindo 100% de
+    // integridade dos bytes da assinatura.
+    return res.redirect(302, pdfUrl);
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
-    return res
-      .status(500)
-      .send("Erro interno ao tentar recuperar ou enviar o arquivo.");
+    return res.status(500).send("Erro interno ao processar requisição.");
   }
 });
 
