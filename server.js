@@ -288,7 +288,11 @@ app.post("/api/sign/laudo", async (req, res) => {
 // URL no QR Code: https://cannaconsult-backend.onrender.com/api/validacao/12345?token=ABC
 app.get("/api/validacao/:idDocumento", async (req, res) => {
   const { idDocumento } = req.params;
-  const { token } = req.query;
+  let { token } = req.query;
+
+  if (token && token.includes("?")) {
+    token = token.split("?")[0];
+  }
 
   const acceptHeader = req.headers.accept || "";
 
@@ -320,7 +324,13 @@ app.get("/api/validacao/:idDocumento", async (req, res) => {
 app.get("/api/download/:idDocumento", async (req, res) => {
   try {
     const { idDocumento } = req.params;
-    const { token } = req.query;
+    let { token } = req.query;
+
+    // 👇 HIGIENIZAÇÃO DO TOKEN (Limpa a bagunça do ITI) 👇
+    if (token && token.includes("?")) {
+      token = token.split("?")[0];
+      // Se vier "TR04AN?_secretCode=TR04AN", ele corta na interrogação e guarda só "TR04AN"
+    }
 
     const laudosRef = db.collection("laudos");
 
