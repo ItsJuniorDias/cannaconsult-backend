@@ -371,10 +371,12 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       return res.status(401).send("Não Autorizado");
     }
 
+    console.log(_format, "FORMAT RECEBIDO DO ITI");
+
     // ============================================================
     // 👇 NOVA REGRA: HANDSHAKE DO VALIDADOR ITI 👇
     // ============================================================
-    if (_format === "application/validador-iti+json") {
+    if (_format === "application/validador-iti json") {
       console.log(`[ITI] 🤝 Respondendo handshake JSON para o Validador.`);
 
       return res.json({
