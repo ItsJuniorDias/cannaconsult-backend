@@ -335,15 +335,16 @@ app.get("/api/validacao/:idDocumento", async (req, res) => {
 app.get("/api/download/:idDocumento", async (req, res) => {
   try {
     const { idDocumento } = req.params;
-    const { _format, _secretCode } = req.query; // Captura os parâmetros do ITI
+    const { _format, _secretCode, raw } = req.query;
     let { token } = req.query;
 
-    // 1. Prioriza o _secretCode do ITI como token, se disponível
     const finalToken = _secretCode || token;
-
-    // Higienização para casos de URLs mal formadas
     let cleanToken = finalToken;
-    if (cleanToken && cleanToken.includes("?")) {
+    if (
+      cleanToken &&
+      typeof cleanToken === "string" &&
+      cleanToken.includes("?")
+    ) {
       cleanToken = cleanToken.split("?")[0];
     }
 
@@ -353,7 +354,7 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     let validToken = null;
     let tipoDocumento = "";
 
-    // Busca no Firestore (Lógica mantida)
+    // Busca no Firestore
     const receitaQuery = await laudosRef
       .where("receitaId", "==", idDocumento)
       .get();
@@ -374,28 +375,24 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       }
     }
 
-    // Validações Básicas
     if (!docData) return res.status(404).send("Documento não encontrado");
 
     if (validToken !== cleanToken) {
       console.log(`[ITI] ❌ Token inválido: ${cleanToken}`);
       return res.status(401).send("Não Autorizado");
     }
-
     console.log(_format, "FORMAT RECEBIDO DO ITI");
-
     // ============================================================
-    // 👇 NOVA REGRA: HANDSHAKE DO VALIDADOR ITI 👇
+    // 👇 HANDSHAKE DO VALIDADOR ITI (Detecta o formato com ou sem o '+') 👇
     // ============================================================
-    if (_format === "application/validador-iti json") {
-      console.log(`[ITI] 🤝 Respondendo handshake JSON para o Validador.`);
-
+    if (_format && _format.includes("validador-iti") && raw !== "true") {
+      console.log(`[ITI] 🤝 Respondendo handshake JSON.`);
+      res.setHeader("Content-Type", "application/json");
       return res.json({
         version: "1.0.0",
         prescription: {
           signatureFiles: [
             {
-              // Esta é a URL que o ITI vai chamar em seguida para pegar o PDF de fato
               url: `https://cannaconsult-backend.onrender.com/api/download/${idDocumento}?token=${validToken}&raw=true`,
             },
           ],
@@ -404,19 +401,30 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     }
 
     // ============================================================
-    // 👇 ENTREGA DO ARQUIVO BRUTO (PDF) 👇
+    // 👇 ENTREGA DO ARQUIVO BRUTO (PDF) - PROTEÇÃO BINÁRIA 👇
     // ============================================================
-    console.log(`[ITI] ✅ Enviando PDF bruto para o sistema.`);
+    console.log(`[ITI] ✅ Enviando PDF bruto. ID: ${idDocumento}`);
 
-    const response = await axios.get(pdfUrl, { responseType: "arraybuffer" });
+    // Forçamos o axios a não interpretar os dados de nenhuma forma
+    const response = await axios({
+      method: "get",
+      url: pdfUrl,
+      responseType: "arraybuffer",
+      responseEncoding: "binary",
+    });
+
     const pdfBuffer = Buffer.from(response.data);
     const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
 
+    // Headers fundamentais para manter a assinatura intacta
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${nomeArquivo}"`);
     res.setHeader("Content-Length", pdfBuffer.length);
+    res.setHeader("Accept-Ranges", "bytes"); // Importante para o Adobe Reader
+    res.setHeader("Cache-Control", "no-store"); // Evita que proxies alterem o arquivo
 
-    return res.send(pdfBuffer);
+    // .end() com 'binary' é mais seguro que .send() para arquivos assinados
+    return res.status(200).end(pdfBuffer, "binary");
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
     return res.status(500).send("Erro interno.");
