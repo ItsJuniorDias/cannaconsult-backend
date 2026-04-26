@@ -360,7 +360,7 @@ app.get("/api/download/:idDocumento", async (req, res) => {
 
     if (!receitaQuery.empty) {
       docData = receitaQuery.docs[0].data();
-      pdfUrl = docData.receitaPdfUrl;
+      pdfUrl = docData.receitaAssinadaUrl;
       validToken = docData.receitaSecret;
     } else {
       const laudoQuery = await laudosRef
@@ -369,7 +369,7 @@ app.get("/api/download/:idDocumento", async (req, res) => {
 
       if (!laudoQuery.empty) {
         docData = laudoQuery.docs[0].data();
-        pdfUrl = docData.laudoPdfUrl;
+        pdfUrl = docData.laudoAssinadoUrl;
         validToken = docData.laudoSecret;
       }
     }
