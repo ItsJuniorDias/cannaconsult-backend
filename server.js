@@ -19,7 +19,25 @@ const Documento = require("./model/Documento");
 const { Payment } = require("mercadopago");
 const mpClient = require("./services/mercadoPagoService");
 
-const serviceAccount = require("./firebase-service-account.json");
+// ==========================================
+// 1. CONFIGURAÇÃO DO FIREBASE ADMIN
+// ==========================================
+let serviceAccount;
+
+if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
+  // Em produção (Render), decodifica a string Base64 de volta para um objeto JSON
+  const buffer = Buffer.from(
+    process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
+    "base64",
+  );
+  serviceAccount = JSON.parse(buffer.toString("utf-8"));
+} else {
+  // Em desenvolvimento local, usa o arquivo normalmente
+  serviceAccount = require(
+    process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
+      "./firebase-service-account.json",
+  );
+}
 
 const app = express();
 
