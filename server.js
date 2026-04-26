@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 
+const fs = require("fs");
+
 const admin = require("firebase-admin");
 
 const crypto = require("crypto");
@@ -24,19 +26,36 @@ const mpClient = require("./services/mercadoPagoService");
 // ==========================================
 let serviceAccount;
 
-if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-  // Em produção (Render), decodifica a string Base64 de volta para um objeto JSON
-  const buffer = Buffer.from(
-    process.env.FIREBASE_SERVICE_ACCOUNT_BASE64,
-    "base64",
+// Tenta ler do diretório de Secret Files do Render primeiro
+const renderSecretPath = "/etc/secrets/firebase-service-account.json";
+const localSecretPath = "./firebase-service-account.json";
+
+try {
+  if (fs.existsSync(renderSecretPath)) {
+    console.log(
+      "🟢 Carregando credenciais do Firebase via Secret File do Render.",
+    );
+    serviceAccount = require(renderSecretPath);
+  } else if (fs.existsSync(localSecretPath)) {
+    console.log("🟡 Carregando credenciais do Firebase via arquivo local.");
+    serviceAccount = require(localSecretPath);
+  } else {
+    throw new Error(
+      "Arquivo de credenciais do Firebase não encontrado em nenhum diretório.",
+    );
+  }
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+
+  console.log("✅ Firebase Admin inicializado com sucesso.");
+} catch (error) {
+  console.error(
+    "❌ Erro fatal ao inicializar o Firebase Admin:",
+    error.message,
   );
-  serviceAccount = JSON.parse(buffer.toString("utf-8"));
-} else {
-  // Em desenvolvimento local, usa o arquivo normalmente
-  serviceAccount = require(
-    process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
-      "./firebase-service-account.json",
-  );
+  // Não trava o app inteiro caso dê erro no boot, mas avisa
 }
 
 const app = express();
@@ -52,9 +71,6 @@ mongoose
   .catch((err) =>
     console.error("[SERVER] ❌ Erro ao conectar no MongoDB:", err),
   );
-
-// Inicialize o Firebase Admin com suas credenciais do projeto (caso ainda não tenha feito)
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 
 const db = admin.firestore();
 
