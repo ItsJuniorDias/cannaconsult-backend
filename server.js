@@ -11,7 +11,7 @@ const SolutiService = require("./services/solutiService");
 const { createPixOrder } = require("./controller/pixService");
 const { createCreditCardOrder } = require("./controller/creditCardService");
 
-import Documento from "./model/Documento";
+const Documento = require("./model/Documento");
 
 // Importando o SDK do Mercado Pago
 const { Payment } = require("mercadopago");
