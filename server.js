@@ -407,10 +407,17 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     );
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", "inline");
+    res.setHeader("Content-Disposition", "inline; filename=documento.pdf");
     res.setHeader("Cache-Control", "no-transform");
+    res.setHeader("Content-Encoding", "identity");
 
-    https.get(pdfUrl, (response) => {
+    const options = {
+      headers: {
+        "Accept-Encoding": "identity", // 🔥 ESSENCIAL
+      },
+    };
+
+    https.get(pdfUrl, options, (response) => {
       response.pipe(res);
     });
   } catch (error) {
