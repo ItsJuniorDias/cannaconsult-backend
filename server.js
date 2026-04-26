@@ -19,7 +19,7 @@ const Documento = require("./model/Documento");
 const { Payment } = require("mercadopago");
 const mpClient = require("./services/mercadoPagoService");
 
-const serviceAccount = require("./firebase-service-account.json");
+const serviceAccount = require(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
 
 const app = express();
 
