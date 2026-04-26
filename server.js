@@ -333,7 +333,8 @@ app.get("/api/validacao/:idDocumento", async (req, res) => {
 
 // ==========================================
 // 3. ROTA DE DOWNLOAD (Buscando do Firebase)
-// ==========================================
+// ==========================================import https from "https";
+
 app.get("/api/download/:idDocumento", async (req, res) => {
   try {
     const { idDocumento } = req.params;
@@ -342,23 +343,21 @@ app.get("/api/download/:idDocumento", async (req, res) => {
 
     const finalToken = _secretCode || token;
     let cleanToken = finalToken;
-    if (
-      cleanToken &&
-      typeof cleanToken === "string" &&
-      cleanToken.includes("?")
-    ) {
+
+    if (cleanToken?.includes("?")) {
       cleanToken = cleanToken.split("?")[0];
     }
 
     const laudosRef = db.collection("laudos");
+
     let docData = null;
     let pdfUrl = null;
     let validToken = null;
 
-    // Busca no Firestore
     const receitaQuery = await laudosRef
       .where("receitaId", "==", idDocumento)
       .get();
+
     if (!receitaQuery.empty) {
       docData = receitaQuery.docs[0].data();
       pdfUrl = docData.receitaPdfUrl;
@@ -367,6 +366,7 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       const laudoQuery = await laudosRef
         .where("laudoId", "==", idDocumento)
         .get();
+
       if (!laudoQuery.empty) {
         docData = laudoQuery.docs[0].data();
         pdfUrl = docData.laudoPdfUrl;
@@ -374,7 +374,9 @@ app.get("/api/download/:idDocumento", async (req, res) => {
       }
     }
 
-    if (!docData) return res.status(404).send("Documento não encontrado");
+    if (!docData) {
+      return res.status(404).send("Documento não encontrado");
+    }
 
     if (validToken !== cleanToken) {
       console.log(`[ITI] ❌ Token inválido: ${cleanToken}`);
@@ -382,22 +384,45 @@ app.get("/api/download/:idDocumento", async (req, res) => {
     }
 
     // ============================================================
-    // 👇 HANDSHAKE DO VALIDADOR ITI
+    // HANDSHAKE ITI
     // ============================================================
-    if (_format && _format.includes("validador-iti") && raw !== "true") {
-      console.log(`[ITI] 🤝 Respondendo handshake JSON.`);
-      res.setHeader("Content-Type", "application/json");
+    if (_format?.includes("validador-iti") && raw !== "true") {
       return res.json({
         version: "1.0.0",
         prescription: {
           signatureFiles: [
             {
-              url: pdfUrl,
+              url: `https://cannaconsult-backend.onrender.com/api/download/${idDocumento}?token=${validToken}&raw=true`,
             },
           ],
         },
       });
     }
+
+    // ============================================================
+    // 🔥 MODO CURL-LIKE (BYTE PERFECT STREAM)
+    // ============================================================
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline; filename=documento.pdf");
+    res.setHeader("Cache-Control", "no-transform");
+    res.setHeader("Content-Encoding", "identity");
+
+    https.get(
+      pdfUrl,
+      {
+        headers: {
+          "Accept-Encoding": "identity",
+        },
+      },
+      (response) => {
+        if (response.statusCode !== 200) {
+          return res.status(500).send("Erro ao buscar PDF original");
+        }
+
+        response.pipe(res);
+      },
+    );
   } catch (error) {
     console.error("[ITI] Erro no processamento:", error);
     return res.status(500).send("Erro interno ao processar requisição.");
