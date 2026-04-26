@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
 
+const admin = require("firebase-admin");
+
 const crypto = require("crypto");
 const mongoose = require("mongoose");
 
@@ -16,6 +18,8 @@ const Documento = require("./model/Documento");
 // Importando o SDK do Mercado Pago
 const { Payment } = require("mercadopago");
 const mpClient = require("./services/mercadoPagoService");
+
+const serviceAccount = require("./firebase-service-account.json");
 
 const app = express();
 
@@ -30,6 +34,11 @@ mongoose
   .catch((err) =>
     console.error("[SERVER] ❌ Erro ao conectar no MongoDB:", err),
   );
+
+// Inicialize o Firebase Admin com suas credenciais do projeto (caso ainda não tenha feito)
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+
+const db = admin.firestore();
 
 // Rota 1: Gerar URL
 app.get("/api/auth-url", (req, res) => {
@@ -239,75 +248,108 @@ app.post("/api/sign/laudo", async (req, res) => {
 // ENDPOINTS DO VALIDADOR ITI (QR CODE)
 // ============================================================================
 
-// 1. Rota que o QR Code aponta
-// Rota "Guarda de Trânsito" (A URL que está no QR Code)
+// ==========================================
+// 2. ROTA "GUARDA DE TRÂNSITO" (Vai no QR Code)
+// ==========================================
+// URL no QR Code: https://cannaconsult-backend.onrender.com/api/validacao/12345?token=ABC
 app.get("/api/validacao/:idDocumento", async (req, res) => {
   const { idDocumento } = req.params;
   const { token } = req.query;
 
-  // Verifica o cabeçalho 'Accept'. Navegadores (Safari, Chrome) sempre pedem 'text/html'.
-  // O validador do ITI / Farmácias pedem '*/*' ou 'application/pdf'.
   const acceptHeader = req.headers.accept || "";
 
+  // Se for um navegador comum (Paciente escaneando com celular)
   if (acceptHeader.includes("text/html")) {
-    // ==========================================
-    // FLUXO 1: PACIENTE COM A CÂMERA NATIVA
-    // ==========================================
     console.log(
       `[Redirecionamento] Paciente acessou via navegador. ID: ${idDocumento}`,
     );
 
-    // Substitua pela URL real de produção do seu frontend!
-    const urlDoSeuFront = "https://cannaconsult.com.br";
+    // Substitua pela URL de produção do seu Front onde fica a UI
+    const urlDoSeuFront = "https://cannaconsult.com.br/";
 
-    // Manda o paciente para a sua tela visual de fallback
     return res.redirect(
       `${urlDoSeuFront}/validar-receita-medica?id=${idDocumento}&token=${token}`,
     );
   } else {
-    // ==========================================
-    // FLUXO 2: VALIDADOR DO ITI OU FARMÁCIA
-    // ==========================================
+    // Se for o robô do ITI / Farmácia
     console.log(
       `[Redirecionamento] Sistema ITI acessando arquivo bruto. ID: ${idDocumento}`,
     );
 
-    // Como é o ITI, redireciona internamente para a sua rota de download que já está pronta!
     return res.redirect(`/api/download/${idDocumento}?token=${token}`);
   }
 });
 
-// 2. Rota de Download Direto
+// ==========================================
+// 3. ROTA DE DOWNLOAD (Buscando do Firebase)
+// ==========================================
 app.get("/api/download/:idDocumento", async (req, res) => {
   try {
     const { idDocumento } = req.params;
     const { token } = req.query;
 
-    // Busca no MongoDB
-    const doc = await Documento.findOne({ documentId: idDocumento });
+    const laudosRef = db.collection("laudos");
 
-    if (!doc || doc.secretCode !== token) {
+    let docData = null;
+    let pdfUrl = null;
+    let validToken = null;
+    let tipoDocumento = "";
+
+    // Como Laudos e Receitas ficam na mesma collection, busca pelos dois IDs
+    const receitaQuery = await laudosRef
+      .where("receitaId", "==", idDocumento)
+      .get();
+
+    if (!receitaQuery.empty) {
+      docData = receitaQuery.docs[0].data();
+      pdfUrl = docData.receitaPdfUrl;
+      validToken = docData.receitaSecret;
+      tipoDocumento = "receita";
+    } else {
+      const laudoQuery = await laudosRef
+        .where("laudoId", "==", idDocumento)
+        .get();
+      if (!laudoQuery.empty) {
+        docData = laudoQuery.docs[0].data();
+        pdfUrl = docData.laudoPdfUrl;
+        validToken = docData.laudoSecret;
+        tipoDocumento = "laudo";
+      }
+    }
+
+    // Validações
+    if (!docData) {
+      console.log(
+        `[ITI] ❌ Documento não encontrado no Firestore. ID: ${idDocumento}`,
+      );
+      return res.status(404).send("Documento não encontrado");
+    }
+
+    if (validToken !== token) {
+      console.log(
+        `[ITI] ❌ Token inválido para o ID: ${idDocumento}. Esperado: ${validToken}, Recebido: ${token}`,
+      );
       return res.status(403).send("Acesso Negado");
     }
 
-    const pdfBuffer = Buffer.from(doc.pdfBase64, "base64");
+    console.log(`[ITI] ✅ Credenciais validadas. Baixando PDF do Storage...`);
 
-    const nomeArquivo = doc.tipo.toLowerCase().replace(" ", "_");
+    // Busca o PDF binário da URL pública do Firebase Storage
+    const response = await axios.get(pdfUrl, { responseType: "arraybuffer" });
+    const pdfBuffer = Buffer.from(response.data);
 
+    const nomeArquivo = `${tipoDocumento}_${idDocumento}.pdf`;
+
+    // Devolve o Buffer para o sistema do governo
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${nomeArquivo}_${idDocumento}.pdf"`,
-    );
+    res.setHeader("Content-Disposition", `inline; filename="${nomeArquivo}"`);
     res.setHeader("Content-Length", pdfBuffer.length);
 
-    console.log(
-      `[ITI] 📥 Enviando arquivo PDF para o validador. ID: ${idDocumento}`,
-    );
+    console.log(`[ITI] 📥 Enviando arquivo com sucesso. ID: ${idDocumento}`);
     return res.send(pdfBuffer);
   } catch (error) {
     console.error("[ITI] Erro no download do documento:", error);
-    return res.status(500).send("Erro ao processar o arquivo.");
+    return res.status(500).send("Erro interno ao processar o arquivo.");
   }
 });
 
